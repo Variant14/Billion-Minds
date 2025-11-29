@@ -1,0 +1,158 @@
+KB-001 — VPN authentication fails after password reset
+
+    ID: KB-001
+    Category: network
+    Pattern:
+        “VPN authentication failed; password works for email; MFA prompt not showing or failing.”
+
+    Summary:
+        Typical VPN failures after a password change are caused by cached credentials or outdated VPN profiles on the client.
+
+    Resolution Steps:
+
+        Ask user to close the VPN client completely (including tray).
+        Remove VPN/domain entries from Windows Credential Manager.
+        Sign out/in of Microsoft 365 desktop apps.
+        Delete old VPN profile.
+        Import latest VPN config file.
+        Trigger MFA re-registration if prompts fail.
+        Reconnect and verify access (Jira/Git).
+        If still failing, gather logs and escalate.
+
+    Last Resolved:
+    Ticket: TKT-1764158427172
+    By: AI Support Agent (agent_ai_01)
+    Date: 2025-11-26
+    Used in Tickets: TKT-1764158427172, TKT-1164
+
+KB-002 — Outlook not syncing after mailbox migration
+
+    ID: KB-002
+    Category: software
+    Pattern:
+        “Outlook stuck on Updating inbox or Trying to connect; webmail works.”
+
+    Summary:
+        Usually caused by outdated mail profiles or corrupted OST files referencing legacy mailboxes.
+
+    Resolution Steps:
+
+        Verify Outlook Web access.
+        Remove outdated Exchange profiles.
+        Open Control Panel → Mail and delete legacy profiles.
+        Create a new profile via AutoDiscover.
+        Enable Cached Exchange Mode (1–2 year window).
+        Allow full OST rebuild.
+        Repair or recreate OST file if corrupted.
+        Escalate if department-wide.
+
+    Last Resolved:
+    Ticket: TKT-1588
+    By: Sarah Lopez (it_support_l1_02)
+    Used in Tickets: TKT-1588
+
+KB-003 — Developer laptop slow with Docker + IDE
+
+    ID: KB-003
+    Category: performance
+    Pattern:
+        “High CPU/memory when Docker + browser + IDE are open on 16GB RAM machines.”
+
+    Summary:
+        Docker, VS Code, and Chrome together saturate resources unless Docker is tuned and startup apps trimmed.
+
+    Resolution Steps:
+
+        Confirm CPU/RAM usage in Task Manager.
+        Reduce Docker vCPU/RAM allocation.
+        Disable auto-start containers.
+        Disable non-essential startup apps.
+        Update graphics/chipset drivers.
+        Reboot and test again.
+        Consider RAM/SSD upgrade or remote build agents.
+
+    Last Resolved:
+    Ticket: TKT-1764158260799
+    By: AI Support Agent
+    Used in Tickets: TKT-1764158260799
+
+KB-004 — Handling repeated BSODs (critical users)
+
+    ID: KB-004
+    Category: hardware
+    Pattern:
+        “Blue screens multiple times per day, repeated incidents on same device.”
+
+    Summary:
+        Typically failing hardware (RAM/SSD) or critical drivers. For client-facing staff, immediate hardware replacement is required.
+
+    Resolution Steps:
+
+        Check if ≥2 BSOD incidents occurred within 7 days.
+        Collect minidump + run disk/memory diagnostics.
+        Mark user as critical if required.
+        Initiate hardware replacement.
+        Ensure OneDrive/SharePoint sync.
+        Reimage and redeploy apps.
+        Test conferencing apps.
+        Monitor 48 hours.
+        Document all hardware details.
+
+    Last Resolved:
+
+    Ticket: TKT-1720
+
+    By: John Smith (it_support_l2_01)
+
+    Used in Tickets: TKT-1720, TKT-1764161161702
+
+KB-005 — USB peripherals fail through docking station
+
+    ID: KB-005
+    Category: hardware
+    Pattern:
+        “Mouse/keyboard disconnects through dock but works directly via laptop.”
+
+    Summary:
+        Usually dock firmware, power issues, or failing USB hub.
+
+    Resolution Steps:
+
+        Test mouse/keyboard directly on laptop.
+        Update dock firmware/drivers.
+        Check power brick/wattage.
+        Try different dock USB ports.
+        Disable USB selective suspend.
+        Swap with known-good dock.
+        Escalate if multiple users affected.
+
+    Last Resolved:
+    Ticket: TKT-1374
+    By: Priya Nair (it_support_l1_03)
+    Used in Tickets: TKT-1374, TKT-1764162205120
+
+KB-006 — Slow boot after Windows update
+
+    ID: KB-006
+    Category: performance
+    Pattern:
+        “Boot takes 5–10+ minutes after major Windows feature update.”
+
+    Summary:
+        Caused by disk fragmentation, startup overload, or drivers broken post-update.
+
+    Resolution Steps:
+
+        Check boot time in Event Viewer.
+        Run disk health check & SMART test.
+        Disable non-essential startup apps.
+        Run sfc /scannow + DISM repair.
+        Install post-update patches & drivers.
+        Update chipset/storage drivers.
+        Enable boot logging to diagnose delays.
+        Consider SSD replacement if failing.
+
+    Last Resolved:
+    Ticket: TKT-2399
+    By: Alex Turner (it_support_l1_01)
+    Used in Tickets: TKT-2399

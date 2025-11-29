@@ -1,0 +1,28 @@
+# Streamlit app
+streamlit>=1.24.0
+python-dotenv>=1.1.0
+
+# LangChain core
+langchain-core>=0.3.0
+langchain>=0.3.23
+
+# OpenAI integration (if you still plan to use it)
+langchain-openai>=0.3.12
+openai>=1.31.0
+
+# LangChain community tools
+langchain-community>=0.1.0
+
+# Google Gemini (optional, for the LLM)
+langchain-google-genai>=0.1.0
+
+# Vector store for RAG
+chromadb>=0.3.26
+
+# Text splitting
+langchain-text-splitters>=0.1.0
+
+# Optional document handling
+unstructured>=0.7.0
+
+sentence-transformers>=2.7.0
