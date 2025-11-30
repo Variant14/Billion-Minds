@@ -14,6 +14,7 @@ import re
 import time
 import json
 import extra_streamlit_components as stx
+from datetime import datetime # <--- ADDED IMPORT
 
 # --- LangChain Core ---
 from langchain_core.messages import HumanMessage, AIMessage
@@ -47,6 +48,9 @@ DEFAULTS = {
     "users": {},
     "current_user": None,
     "show_reset_countdown": False,
+    "ticket_created":False,
+    "ticket":[],
+    "ticketId": "Test"
 }
 
 for k, v in DEFAULTS.items():
@@ -182,7 +186,7 @@ def setup_rag_pipeline():
         persist_directory=str(CHROMA_PATH)
     )
 
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})    
     st.success(f"Knowledge Base Ready — {len(docs)} chunks loaded.")
     return retriever
 
@@ -207,6 +211,8 @@ def reset_chat():
     st.session_state.technician_assign = False
     st.session_state.greeted = False
     st.session_state.show_reset_countdown = False
+    st.session_state.ticket_created = False
+    st.session_state.ticket = []
 
 def is_technical_issue(user_query):
     """Detect if user query is a technical issue that needs resolution"""
@@ -227,16 +233,48 @@ def is_technical_issue(user_query):
     
     # Check for technical keywords
     technical_keywords = [
+        # General Failure & Troubleshooting
         'error', 'issue', 'problem', 'not working', 'can\'t', 'cannot', 'won\'t',
         'unable', 'failed', 'crash', 'bug', 'broken', 'slow', 'freeze', 'stuck',
-        'help with', 'fix', 'solve', 'troubleshoot', 'install', 'configure',
-        'reset', 'password', 'login', 'access', 'connection', 'network', 'syncing', 'migration',
-        'VPN', 'authentication', 'MFA', 'cached credentials', 'VPN profile', 'credential manager',
-        'Outlook', 'mailbox', 'Exchange', 'OST file', 'profile', 'AutoDiscover', 'Cached Exchange Mode',
-        'Docker', 'IDE', 'VS Code', 'CPU', 'RAM', 'memory', 'startup apps', 'graphics driver',
-        'chipset driver', 'BSOD', 'blue screen', 'minidump', 'hardware replacement', 'SSD',
-        'USB', 'peripherals', 'dock', 'firmware', 'power brick', 'boot', 'disk fragmentation', 'sfc',
-        'DISM', 'post-update patches', 'boot logging', 'slow boot', 'performance', 'critical driver'
+        'disconnects', 'help with', 'fix', 'solve', 'troubleshoot', 'install',
+        'configure', 'reset', 'performance', 'ticket', 'service desk',
+
+        # Access, Security & Credentials
+        'password', 'login', 'access', 'authentication', 'MFA', 'credential manager',
+        'cached credentials', 'access denied', 'permission', 'local admin',
+        'phishing', 'compromised account', 'encryption', 'token', 'key', 'two-factor', '2FA',
+        'licensing', 'compliance',
+
+        # Networking & Connectivity
+        'connection', 'network', 'VPN', 'VPN profile', 'IP address', 'DNS', 'DHCP',
+        'router', 'switch', 'latency', 'bandwidth', 'Proxy', 'LAN', 'WAN', 'WLAN',
+        'Firewall', 'network security',
+
+        # Email & Collaboration (Outlook/Exchange/Cloud)
+        'Outlook', 'mailbox', 'Exchange', 'OST file', 'profile', 'AutoDiscover',
+        'Cached Exchange Mode', 'syncing', 'migration', 'SharePoint', 'OneDrive',
+        'Teams', 'Office 365', 'cloud', 'SaaS', 'IaaS',
+
+        # Hardware & Peripherals
+        'CPU', 'RAM', 'memory', 'startup apps', 'graphics driver', 'chipset driver',
+        'BSOD', 'blue screen', 'minidump', 'hardware replacement', 'SSD', 'USB',
+        'peripherals', 'dock', 'firmware', 'power brick', 'monitor', 'display',
+        'resolution', 'keyboard', 'mouse', 'webcam', 'printer', 'scanner',
+        'driver signature', 'laptop', 'desktop',
+
+        # Operating System & System Utilities
+        'boot', 'disk fragmentation', 'sfc', 'DISM', 'post-update patches',
+        'boot logging', 'slow boot', 'critical driver', 'Windows', 'macOS', 'Linux',
+        'registry', 'Group Policy', 'GPO', 'Active Directory', 'Azure AD',
+        'application', 'software', 'program', 'update', 'patch', 'rollback',
+        'virtual machine', 'VM', 'hypervisor', 'antivirus', 'malware',
+
+        # Development & Specialized Tools
+        'Docker', 'IDE', 'VS Code', 'GitHub', 'Kubernetes', 'scripting', 'CI/CD',
+
+        # Mobile & Remote Computing
+        'mobile device', 'phone', 'tablet', 'iOS', 'Android', 'MDM',
+        'VDI', 'Citrix'
     ]
     
     return any(keyword in query_lower for keyword in technical_keywords)
@@ -268,11 +306,12 @@ def get_rag_answer(user_query, context_override=None, is_technical=True):
         context_text += "\n\n" + context_override
 
     if is_technical:
+        st.sidebar.write("Debug: Its technical")
         template = """
 You are an IT Support Technician. Answer using CONTEXT first. 
 If the context has the resolution steps then just display them and mention the source from the KB.
 If context is insufficient, be professional and helpful.
-Provide step-by-step troubleshooting when addressing technical issues.
+Provide step-by-step troubleshooting when addressing technical issues and clearly state that this scenario isnt in the Knowledge base
 
 CONTEXT:
 ---------
@@ -283,6 +322,7 @@ Chat history: {chat_history}
 User question: {user_question}
         """
     else:
+        #st.sidebar.write("Debug: Its not technical")
         template = """
 You are a friendly IT Support Assistant. Respond naturally to the user's message.
 Be conversational and helpful for general queries.
@@ -319,12 +359,38 @@ def handle_user_query(user_query):
     context_text = combine_documents(context_docs) if context_docs else ""
 
     if len(context_text) < 200:
+        #st.sidebar.write("Debug: No matching context")
         st.session_state.clarification_mode = True
         st.session_state.clarification_index = 0
         st.session_state.clarification_questions = generate_clarification_questions(user_query)
         st.session_state.clarification_answers = []
         return iter([st.session_state.clarification_questions[0]]), False
     
+    if(not st.session_state.ticket_created):
+        st.session_state.ticket_created = True
+        category = classify_category(user_query)
+        current = st.session_state.current_user
+        user_name = st.session_state.users[current]["name"]
+        ticket_data = get_title_description(user_query)
+        title = ticket_data.get("title","Untitled Issue")
+        description = ticket_data.get("description","")
+        st.session_state.ticket ={
+            "id": "",     
+            "title": title,
+            "user_id": "",
+            "user_name": user_name,
+            "description": description,
+            "priority": 2,
+            "status": "open",
+            "urgency": "medium",
+            "category": category,
+            "knowledge_base_id": "",
+            "assigned_to": "agent_ai_01",
+            "created_at": "",
+            "resolved_at": "",
+            "is_resolved": False
+        }
+    #st.sidebar.write("Debug: Have context")
     st.session_state.clarification_mode = False
     return get_rag_answer(user_query, is_technical=True), True
 
@@ -335,9 +401,13 @@ You are an IT Support AI evaluator. Based on the conversation history and issue 
 
 Context: {context}
 
-Respond with ONLY ONE WORD:
 - "AI_SOLVABLE" if the issue can be resolved through automated steps, scripts, or configuration changes
 - "HUMAN_NEEDED" if the issue requires physical access, hardware replacement, complex judgment, or escalated permissions
+
+Respond with ONLY in strict JSON:
+{{
+  "decision": "AI_SOLVABLE" | "HUMAN_NEEDED"
+}}
 
 Your response:"""
 
@@ -347,10 +417,34 @@ Your response:"""
     chain = prompt | llm | StrOutputParser()
     result = chain.invoke({"context": issue_context}).strip().upper()
     
-    # Extract the first word only
-    first_word = result.split()[0] if result else ""
+    try:
+        data = json.loads(result)
+        decision = data.get("decision", "").strip().upper()
+        return decision == "AI_SOLVABLE"
+    except:
+        return False
+
+def classify_category(issue_context):
+    template = """
+You are an IT Support AI evaluator. Based on the conversation history and issue context, determine which category this issue falls under.
+
+Context: {context}
+
+Respond with ONLY ONE WORD, choosing from:
+- "Software"
+- "Hardware"
+- "Network"
+- "Performance"
+
+Your response:
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, api_key=GEMINI_KEY)
     
-    return first_word == "AI_SOLVABLE"
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({"context": issue_context}).strip()
+
+    return result.split()[0].capitalize()
 
 def get_next_clarification():
     idx = st.session_state.clarification_index + 1
@@ -360,6 +454,84 @@ def get_next_clarification():
     st.session_state.clarification_mode = False
     context_override = "User clarification answers:\n" + "\n".join(st.session_state.clarification_answers)
     return get_rag_answer("Final comprehensive diagnosis and solution", context_override=context_override)
+
+def get_title_description(issue_context):
+    template = """
+You are an IT Support AI evaluator. Based on the full conversation and issue context, generate a **clear, concise ticket title** and a **human-readable description**.
+
+Context:
+{context}
+
+Respond in STRICT JSON ONLY:
+{{
+    "title": "",
+    "description": ""
+}}
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2,
+        api_key=GEMINI_KEY
+    )
+    chain = prompt | llm | StrOutputParser()
+    raw = chain.invoke({"context": issue_context}).strip()
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not json_match:
+        return {"title": "Untitled Issue", "description": issue_context}
+
+    json_text = json_match.group(0)
+    try:
+        data = json.loads(json_text)
+        return data
+    except:
+        return {"title": "Untitled Issue", "description": issue_context}
+
+def update_ticket_resolve(ticketId):
+    st.sidebar.write("Debug: Updating Case to resolve")
+
+def create_ticket(payload):
+    st.sidebar.write("Debug: Creating ticket")
+
+def assign_to_technician(ticketId):
+    st.sidebar.write("Debug: Assigning the Ticket to technician")
+
+
+def build_conversation_payload(ticketId, message, isUser):
+    """
+    Builds the JSON payload for a single conversation message.
+    User details are retrieved from st.session_state.
+    """
+    current_user_email = st.session_state.current_user
+    user_data = st.session_state.users.get(current_user_email, {})
+
+    if isUser:
+        sender_type = "user"
+        sender_id = current_user_email
+        sender_name = user_data.get("name", "Unknown User")
+    else:
+        sender_type = "agent"
+        # Using a fallback agent ID if ticket hasn't been fully initialized
+        sender_id = "agent_ai_01"
+        sender_name = "AI Support Agent"
+
+    conversation_payload = {
+        "ticketId": ticketId,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "sender_type": sender_type,
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "message": message
+    }
+    st.sidebar.write(conversation_payload)
+    return conversation_payload
+
+def create_conversation(payload):
+    """Placeholder function to log the conversation payload to a database."""
+    # In a real application, this would call an API or write to a database
+    #st.sidebar.write(f"Debug: Logging conversation for Ticket {payload.get('ticketId')}")
+    # st.sidebar.json(payload) # Uncomment to see the full JSON being logged
+
 
 # =============================
 # CHATBOT UI
@@ -376,6 +548,11 @@ if not st.session_state.greeted:
     current = st.session_state.current_user
     user_name = st.session_state.users[current]["name"] if current else "there"
     greeting = f"Hello {user_name}! 👋 I'm your IT Support Assistant. How can I help you today?"
+    
+    # --- LOGGING AI GREETING ---
+    payload = build_conversation_payload(st.session_state.ticketId, greeting, False)
+    create_conversation(payload)
+    
     st.session_state.chat_history.append(AIMessage(greeting))
     st.session_state.greeted = True
 
@@ -392,11 +569,20 @@ if st.session_state.clarification_mode:
         st.markdown(next_q)
     ans = st.chat_input("Answer the clarification question:")
     if ans:
+        # --- LOGGING USER ANSWER ---
+        payload = build_conversation_payload(st.session_state.ticketId, ans, True)
+        create_conversation(payload)
+        
         st.session_state.chat_history.append(HumanMessage(ans))
         st.session_state.clarification_answers.append(ans)
         with st.chat_message("AI"):
             ai_stream = get_next_clarification()
             final = st.write_stream(ai_stream)
+            
+            # --- LOGGING AI RESPONSE ---
+            payload = build_conversation_payload(st.session_state.ticketId, final, False)
+            create_conversation(payload)
+            
             st.session_state.chat_history.append(AIMessage(final))
             st.session_state.show_buttons = True
         st.rerun()
@@ -410,17 +596,31 @@ elif st.session_state.show_buttons:
     with col1:
         if st.button("✅ Yes — Resolved"):
             st.session_state.show_buttons = False
-            st.session_state.chat_history.append(HumanMessage("Yes"))
-            st.session_state.chat_history.append(AIMessage("🎉 Glad your issue is resolved! Feel free to ask if you have any other questions."))
-            st.session_state.chat_history.append(AIMessage("Resetting the chat to start a new conversation!"))
-            time.sleep(3)
+            
+            # --- LOGGING USER YES ---
+            user_msg = "Yes"
+            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
+            create_conversation(payload)
+            st.session_state.chat_history.append(HumanMessage(user_msg))
+            
+            # --- LOGGING AI RESOLVED ---
+            ai_msg = "🎉 Glad your issue is resolved!"
+            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
+            create_conversation(payload)
+            st.session_state.chat_history.append(AIMessage(ai_msg))
+
             st.session_state.awaiting_technician_confirmation = False
-            reset_chat()
+            st.session_state.show_reset_countdown = True
             st.rerun()
     with col2:
         if st.button("❌ No — Not resolved"):
             st.session_state.show_buttons = False
-            st.session_state.chat_history.append(HumanMessage("No"))
+            
+            # --- LOGGING USER NO ---
+            user_msg = "No"
+            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
+            create_conversation(payload)
+            st.session_state.chat_history.append(HumanMessage(user_msg))
             
             # Evaluate if AI can solve the issue
             chat_context = "\n".join([msg.content for msg in st.session_state.chat_history[-10:]])
@@ -433,6 +633,14 @@ elif st.session_state.show_buttons:
             
             st.rerun()
 
+# --- Show reset option after resolution ---
+elif st.session_state.show_reset_countdown:
+    st.markdown("---")
+    st.success("✅ Issue Resolved! Thank you for using IT Support.")
+    if st.button("🔄 Start New Conversation"):
+        reset_chat()
+        st.rerun()
+
 # --- AI resolution confirmation ---
 elif st.session_state.awaiting_resolution_confirmation:
     st.markdown("---")
@@ -441,17 +649,41 @@ elif st.session_state.awaiting_resolution_confirmation:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✅ Proceed with AI fix"):
-            st.session_state.chat_history.append(HumanMessage("Proceed with AI fix"))
-            st.session_state.chat_history.append(AIMessage("Proceeding with AI fix"))
+            # --- LOGGING USER PROCEED ---
+            user_msg = "Proceed with AI fix"
+            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
+            create_conversation(payload)
+            st.session_state.chat_history.append(HumanMessage(user_msg))
+            
+            # --- LOGGING AI ACKNOWLEDGEMENT ---
+            ai_msg_ack = "Proceeding with AI fix"
+            payload = build_conversation_payload(st.session_state.ticketId, ai_msg_ack, False)
+            create_conversation(payload)
+            st.session_state.chat_history.append(AIMessage(ai_msg_ack))
+
+            # --- LOGGING AI AUTOMATION MESSAGE ---
+            ai_msg_auto = "Please wait while the chat-bot is running System Automation Checks"
+            payload = build_conversation_payload(st.session_state.ticketId, ai_msg_auto, False)
+            create_conversation(payload)
             with st.chat_message("AI"):
-                st.session_state.chat_history.append(AIMessage("Please wait while the chat-bot is running System Automation Checks")) 
+                st.session_state.chat_history.append(AIMessage(ai_msg_auto)) 
             st.session_state.show_buttons = True
             st.session_state.awaiting_resolution_confirmation = False
             st.rerun()
     with col2:
         if st.button("❌ Don't proceed"):
-            st.session_state.chat_history.append(HumanMessage("No, don't proceed with AI fix"))
-            st.session_state.chat_history.append(AIMessage("Okay, Would you like to escalate this issue to a human technician?"))
+            # --- LOGGING USER DON'T PROCEED ---
+            user_msg = "No, don't proceed with AI fix"
+            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
+            create_conversation(payload)
+            st.session_state.chat_history.append(HumanMessage(user_msg))
+
+            # --- LOGGING AI ESCALATION PROMPT ---
+            ai_msg = "Okay, Would you like to escalate this issue to a human technician?"
+            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
+            create_conversation(payload)
+            st.session_state.chat_history.append(AIMessage(ai_msg))
+            
             st.session_state.awaiting_resolution_confirmation = False
             st.session_state.awaiting_technician_confirmation = True
             st.rerun()
@@ -464,16 +696,37 @@ elif st.session_state.awaiting_technician_confirmation:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✅ Yes — Escalate to Technician"):
-            st.session_state.chat_history.append(HumanMessage("Yes, escalate to technician"))
+            # --- LOGGING USER YES ESCALATE ---
+            user_msg = "Yes, escalate to technician"
+            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
+            create_conversation(payload)
+            st.session_state.chat_history.append(HumanMessage(user_msg))
+            
             ticket_id = str(hash(str(st.session_state.chat_history)) % 10000).zfill(4)
-            st.session_state.chat_history.append(AIMessage(f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Ticket ID: #{ticket_id}"))
+            
+            # --- LOGGING AI ESCALATED ---
+            ai_msg = f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Ticket ID: #{ticket_id}"
+            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
+            create_conversation(payload)
+            st.session_state.chat_history.append(AIMessage(ai_msg))
+
             st.session_state.technician_assign = True
             st.session_state.awaiting_technician_confirmation = False
             st.rerun()
     with col2:
         if st.button("❌ No — Start New Chat"):
-            st.session_state.chat_history.append(HumanMessage("No, start a new chat"))
-            st.session_state.chat_history.append(AIMessage("Understood! Let's start fresh. How can I help you today?"))
+            # --- LOGGING USER NO NEW CHAT ---
+            user_msg = "No, start a new chat"
+            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
+            create_conversation(payload)
+            st.session_state.chat_history.append(HumanMessage(user_msg))
+
+            # --- LOGGING AI NEW CHAT PROMPT ---
+            ai_msg = "Understood! Let's start fresh. How can I help you today?"
+            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
+            create_conversation(payload)
+            st.session_state.chat_history.append(AIMessage(ai_msg))
+            
             st.session_state.awaiting_technician_confirmation = False
             reset_chat()
             st.rerun()
@@ -495,12 +748,21 @@ else:
         st.session_state.awaiting_technician_confirmation = False
         st.session_state.technician_assign = False
         
+        # --- LOGGING USER QUERY ---
+        payload = build_conversation_payload(st.session_state.ticketId, user_query, True)
+        create_conversation(payload)
         st.session_state.chat_history.append(HumanMessage(user_query))
+        
         with st.chat_message("Human"):
             st.markdown(user_query)
         with st.chat_message("AI"):
             ai_stream, should_show_buttons = handle_user_query(user_query)
             final = st.write_stream(ai_stream)
+            
+            # --- LOGGING AI RESPONSE ---
+            payload = build_conversation_payload(st.session_state.ticketId, final, False)
+            create_conversation(payload)
+            
             st.session_state.chat_history.append(AIMessage(final))
             st.session_state.show_buttons = should_show_buttons
         st.rerun()
