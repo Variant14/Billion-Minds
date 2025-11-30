@@ -26,3 +26,6 @@ langchain-text-splitters>=0.1.0
 unstructured>=0.7.0
 
 sentence-transformers>=2.7.0
+
+streamlit-cookies-manager
+extra-streamlit-components
