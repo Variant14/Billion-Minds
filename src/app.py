@@ -1,3 +1,4 @@
+# app.py (updated)
 # Disable Streamlit file watcher immediately
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -53,6 +54,9 @@ DEFAULTS = {
     "users": {},
     "current_user": None,
     "show_reset_countdown": False,
+    # Added defaults for ticket tracking
+    "current_ticket_id": None,
+    "ticket_created": False,
 }
 
 for k, v in DEFAULTS.items():
@@ -99,12 +103,13 @@ def ensure_metadata_collection(name: str):
 
 ensure_metadata_collection("users")
 ensure_metadata_collection("tickets")
+ensure_metadata_collection("ticket_conversations")
 
 # =============================
 # USERS (persisted in Qdrant 'users' collection)
 # =============================
 def load_users_from_qdrant():
-    """Load users from Qdrant into session_state.users (map by email)."""
+    """Load users from qdrant into session_state.users (map by email)."""
     try:
         users = {}
         # scroll returns (points, next_page)
@@ -285,62 +290,297 @@ def setup_rag_pipeline():
 retriever = setup_rag_pipeline()
 
 # =============================
+# Utility: Title + Description generator (LLM)
+# =============================
+def get_title_description(issue_context: str):
+    """
+    Uses Gemini to generate a title and description for the ticket.
+    Ensures we always return both fields.
+    """
+    template = """
+You are an IT Support AI evaluator. Based on the issue described below,
+generate a clear ticket title and a detailed but concise description.
+
+Issue:
+{context}
+
+Respond in STRICT JSON ONLY:
+{
+    "title": "",
+    "description": ""
+}
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2,
+        api_key=GEMINI_KEY
+    )
+
+    chain = prompt | llm | StrOutputParser()
+    try:
+        raw = chain.invoke({"context": issue_context}).strip()
+    except Exception as e:
+        # fallback
+        return {"title": "Untitled Issue", "description": issue_context}
+
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+
+    if not json_match:
+        return {"title": "Untitled Issue", "description": issue_context}
+
+    try:
+        data = json.loads(json_match.group(0))
+        return {
+            "title": data.get("title", "Untitled Issue"),
+            "description": data.get("description", issue_context)
+        }
+    except Exception:
+        return {"title": "Untitled Issue", "description": issue_context}
+
+# =============================
+# Conversation payload builder
+# =============================
+def build_conversation_payload(ticket_id, message, is_user=True):
+    """
+    Builds the JSON payload for a single conversation message.
+    User details are retrieved from st.session_state.
+    """
+    current_user_email = st.session_state.current_user
+    user_data = st.session_state.users.get(current_user_email, {})
+
+    if is_user:
+        sender_type = "user"
+        sender_id = current_user_email
+        sender_name = user_data.get("name", "Unknown User")
+    else:
+        sender_type = "agent"
+        sender_id = "agent_ai_01"
+        sender_name = "AI Support Agent"
+
+    conversation_payload = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "sender_type": sender_type,
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "message": message
+    }
+    return conversation_payload
+
+# =============================
 # TICKETS (persisted in Qdrant 'tickets' collection)
 # =============================
-def create_ticket_in_qdrant(user_email: str, chat_history: list, status: str = "Open"):
+def create_ticket():
     """
-    Create a ticket record in Qdrant 'tickets' collection. Uses UUID4 as id.
-    Stores the chat_history (list of message strings) as payload.
+    Create a placeholder ticket at greet time.
+    Title/description will be filled on the first user message.
     """
+    current_user_email = st.session_state.current_user
+    user_obj = st.session_state.users.get(current_user_email, {})
+    user_name = user_obj.get("name", "Unknown")
     ticket_id = str(uuid.uuid4())
-    ticket_record = {
+
+
+    ticket_payload = {
         "ticket_id": ticket_id,
-        "user": user_email,
-        "chat_history": chat_history,
-        "status": status,
-        "created_at": datetime.utcnow().isoformat()
+        "title": "",
+        "user_id": current_user_email,
+        "user_name": user_name,
+        "description": "",
+        "priority": 2,
+        "status": "open",
+        "urgency": "medium",
+        "category": "general",
+        "knowledge_base_id": "",
+        "assigned_to": "agent_ai_01",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "resolved_at": "",
+        "is_resolved": False
     }
+
     try:
         qdrant.upsert(
             collection_name="tickets",
-            points=[
-                rest.PointStruct(
-                    id=ticket_id,
-                    vector=[0.0],  # dummy vector for metadata collection
-                    payload=ticket_record
-                )
-            ]
+            points=[rest.PointStruct(
+                id= ticket_id ,
+                vector=[0.0],
+                payload=ticket_payload
+            )]
         )
+        # initialize the conversation doc in ticket_conversations collection
+        initialize_ticket_conversation(ticket_id)
     except Exception as e:
         st.error(f"Failed to create ticket in DB: {e}")
         return None
-    return ticket_record
 
-def update_ticket_status(ticket_id: str, new_status: str):
+    st.session_state.current_ticket_id = ticket_id
+    st.session_state.ticket_created = True
+    return ticket_payload
+
+def get_all_tickets():
+    tickets = []
+    try:
+        points, _ = qdrant.scroll(collection_name="tickets", limit=1000)
+        for p in points:
+            tickets.append(p.payload)
+    except Exception as e:
+        st.error(f"Failed to fetch tickets: {e}")
+    return tickets
+
+def update_ticket_metadata(ticket_id: str, updates: dict):
     """
-    Fetch ticket, update status, and upsert back.
+    Update (partial) fields of the ticket with ticket_id.
     """
     try:
-        hits = qdrant.search_points(collection_name="tickets", query_vector=[0.0], limit=1000)
-        for h in hits:
-            payload = h.payload or {}
+        points, _ = qdrant.scroll(collection_name="tickets", limit=1000)
+        for p in points:
+            payload = p.payload or {}
             if payload.get("ticket_id") == ticket_id:
-                payload["status"] = new_status
-                payload["updated_at"] = datetime.utcnow().isoformat()
+                payload.update(updates)
+                payload["updated_at"] = datetime.utcnow().isoformat() + "Z"
                 qdrant.upsert(
                     collection_name="tickets",
-                    points=[rest.PointStruct(id=ticket_id, vector=[0.0], payload=payload)]
+                    points=[rest.PointStruct(
+                        id=p.id,
+                        vector=[0.0],
+                        payload=payload
+                    )]
                 )
                 return payload
     except Exception as e:
         st.error(f"Failed to update ticket: {e}")
     return None
 
+def update_ticket_status(ticket_id: str, new_status: str):
+    """
+    Update only status (and mark resolved fields when appropriate).
+    """
+    updates = {"status": new_status}
+    if new_status.lower() in ("resolved", "closed", "closed_by_user"):
+        updates["is_resolved"] = True
+        updates["resolved_at"] = datetime.utcnow().isoformat() + "Z"
+    return update_ticket_metadata(ticket_id, updates)
+
 # =============================
-# HELPER FUNCTIONS
+# TICKET CONVERSATIONS (one-document per ticket)
+# =============================
+def initialize_ticket_conversation(ticket_id):
+    payload = {
+        "ticket_id": ticket_id,
+        "conversation": [],
+        "events": []
+    }
+    try:
+        qdrant.upsert(
+            collection_name="ticket_conversations",
+            points=[rest.PointStruct(
+                id=ticket_id,
+                vector=[0.0],
+                payload=payload
+            )]
+        )
+    except Exception as e:
+        st.error(f"Failed to initialize ticket conversation: {e}")
+
+def get_ticket_conversation(ticket_id):
+    try:
+        points, _ = qdrant.scroll(collection_name="ticket_conversations", limit=1000)
+        for p in points:
+            payload = p.payload or {}
+            if payload.get("ticket_id") == ticket_id:
+                return payload
+    except Exception as e:
+        st.error(f"Failed to read ticket conversation: {e}")
+    return None
+
+def add_conversation_message(ticket_id, message_payload):
+    """
+    Append a message dict to the 'conversation' array of the ticket_conversations document.
+    """
+    try:
+        points, _ = qdrant.scroll(collection_name="ticket_conversations", limit=1000)
+        for p in points:
+            payload = p.payload or {}
+            if payload.get("ticket_id") == ticket_id:
+                payload.setdefault("conversation", []).append(message_payload)
+                qdrant.upsert(
+                    collection_name="ticket_conversations",
+                    points=[rest.PointStruct(
+                        id=p.id,
+                        vector=[0.0],
+                        payload=payload
+                    )]
+                )
+                return payload
+        # if not found, initialize and insert
+        initialize_ticket_conversation(ticket_id)
+        # append again
+        payload = {
+            "ticket_id": ticket_id,
+            "conversation": [message_payload],
+            "events": []
+        }
+        qdrant.upsert(
+            collection_name="ticket_conversations",
+            points=[rest.PointStruct(
+                id=ticket_id,
+                vector=[0.0],
+                payload=payload
+            )]
+        )
+        return payload
+    except Exception as e:
+        st.error(f"Failed to append conversation message: {e}")
+        return None
+
+def add_ticket_event(ticket_id, event_type, actor_type, actor_id, message):
+    event_payload = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "event_type": event_type,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "message": message
+    }
+    try:
+        points, _ = qdrant.scroll(collection_name="ticket_conversations", limit=1000)
+        for p in points:
+            payload = p.payload or {}
+            if payload.get("ticket_id") == ticket_id:
+                payload.setdefault("events", []).append(event_payload)
+                qdrant.upsert(
+                    collection_name="ticket_conversations",
+                    points=[rest.PointStruct(
+                        id=p.id,
+                        vector=[0.0],
+                        payload=payload
+                    )]
+                )
+                return payload
+        # If not found, initialize doc with this event
+        payload = {
+            "ticket_id": ticket_id,
+            "conversation": [],
+            "events": [event_payload]
+        }
+        qdrant.upsert(
+            collection_name="ticket_conversations",
+            points=[rest.PointStruct(
+                id=ticket_id,
+                vector=[0.0],
+                payload=payload
+            )]
+        )
+        return payload
+    except Exception as e:
+        st.error(f"Failed to append ticket event: {e}")
+        return None
+
+# =============================
+# HELPER FUNCTIONS (existing)
 # =============================
 def combine_documents(docs):
-    return "\n\n".join(d.page_content for d in docs)
+    return "\n\n".join(d.page_content for p in docs for d in ([p] if hasattr(p, "page_content") else [])) if docs else ""
 
 def reset_chat():
     """Reset chat to start a new conversation"""
@@ -355,6 +595,8 @@ def reset_chat():
     st.session_state.technician_assign = False
     st.session_state.greeted = False
     st.session_state.show_reset_countdown = False
+    st.session_state.current_ticket_id = None
+    st.session_state.ticket_created = False
 
 def is_technical_issue(user_query):
     """Detect if user query is a technical issue that needs resolution"""
@@ -410,6 +652,7 @@ Do NOT provide a solution.
     return questions[:5]
 
 def get_rag_answer(user_query, context_override=None, is_technical=True):
+    # Use vectorstore similarity search directly if available
     context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     context_text = combine_documents(context_docs) if context_docs else ""
     if context_override:
@@ -455,7 +698,36 @@ User message: {user_question}
     return rag_chain.stream({"user_question": user_query})
 
 def handle_user_query(user_query):
-    # Check if this is a technical issue
+    ticket_id = st.session_state.get("current_ticket_id")
+    ticket_payload = None
+
+    if ticket_id:
+        points, _ = qdrant.scroll(collection_name="tickets", limit=1000)
+        for p in points:
+            payload = p.payload or {}
+            if payload.get("ticket_id") == ticket_id:
+                ticket_payload = payload
+                break
+
+    # First significant user message: generate title/description if empty
+    if ticket_payload and not ticket_payload.get("title"):
+        td = get_title_description(user_query)
+        update_ticket_metadata(ticket_id, {
+            "title": td["title"],
+            "description": td["description"],
+            "created_at": ticket_payload.get("created_at", datetime.utcnow().isoformat() + "Z")
+        })
+        add_ticket_event(ticket_id, "created", "system", "system", "Ticket created from initial user message.")
+
+    # Append user's message to conversation
+    if ticket_id:
+        user_msg_payload = build_conversation_payload(ticket_id, user_query, is_user=True)
+        add_conversation_message(ticket_id, user_msg_payload)
+        add_ticket_event(ticket_id, "message", "user", st.session_state.current_user, user_query)
+
+    # Rest of your logic for RAG, clarifications, etc...
+
+    # Check technical classification
     is_technical = is_technical_issue(user_query)
     
     if not is_technical:
@@ -466,13 +738,13 @@ def handle_user_query(user_query):
     context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     context_text = combine_documents(context_docs) if context_docs else ""
 
-    # Save chat snapshot to session (ticket creation later when needed)
     # If KB context insufficient, trigger clarifications
     if len(context_text) < 200:
         st.session_state.clarification_mode = True
         st.session_state.clarification_index = 0
         st.session_state.clarification_questions = generate_clarification_questions(user_query)
         st.session_state.clarification_answers = []
+        # return first clarification question
         return iter([st.session_state.clarification_questions[0]]), False
     
     st.session_state.clarification_mode = False
@@ -517,18 +789,28 @@ def get_next_clarification():
 st.title("IT Support Chat-Bot")
 st.info("""
 A ticket will be created for each conversation.
-Once the ticket is resovled or cancelled, the chat will reset for new Conversation
+Once the ticket is resolved or cancelled, the chat will reset for new Conversation
 """)
 st.info("This conversation will be stored in our database.")
 
+# greet
 # greet
 if not st.session_state.greeted:
     current = st.session_state.current_user
     user_obj = st.session_state.users.get(current)
     user_name = user_obj.get("name", "there") if user_obj else "there"
+    
+    # Create ticket only if it doesn't exist
+    if not st.session_state.current_ticket_id:
+        ticket_payload = create_ticket()
+        # add creation event
+        if ticket_payload:
+            add_ticket_event(ticket_payload["ticket_id"], "created", "system", "system", "Ticket placeholder created at greet.")
+    
     greeting = f"Hello {user_name}! 👋 I'm your IT Support Assistant. How can I help you today?"
     st.session_state.chat_history.append(AIMessage(greeting))
     st.session_state.greeted = True
+
 
 # display chat history
 for msg in st.session_state.chat_history:
@@ -561,12 +843,11 @@ elif st.session_state.show_buttons:
     with col1:
         if st.button("✅ Yes — Resolved"):
             st.session_state.show_buttons = False
-            # Persist resolved ticket into Qdrant tickets collection
-            ticket = create_ticket_in_qdrant(
-                user_email=st.session_state.current_user,
-                chat_history=[m.content for m in st.session_state.chat_history],
-                status="Resolved"
-            )
+            # Update the existing ticket status to resolved
+            ticket_id = st.session_state.get("current_ticket_id")
+            if ticket_id:
+                update_ticket_status(ticket_id, "resolved")
+                add_ticket_event(ticket_id, "resolved", "agent", "agent_ai_01", "Ticket resolved by agent/AI.")
             st.session_state.chat_history.append(HumanMessage("Yes"))
             st.session_state.chat_history.append(AIMessage("🎉 Glad your issue is resolved! Feel free to ask if you have any other questions."))
             st.session_state.chat_history.append(AIMessage("Resetting the chat to start a new conversation!"))
@@ -622,13 +903,12 @@ elif st.session_state.awaiting_technician_confirmation:
     with col1:
         if st.button("✅ Yes — Escalate to Technician"):
             st.session_state.chat_history.append(HumanMessage("Yes, escalate to technician"))
-            # Create ticket and persist to Qdrant
-            ticket_record = create_ticket_in_qdrant(
-                user_email=st.session_state.current_user,
-                chat_history=[m.content for m in st.session_state.chat_history],
-                status="Escalated"
-            )
-            ticket_id = ticket_record["ticket_id"] if ticket_record else "unknown"
+            # Update ticket status to escalated and persist conversation snapshot
+            ticket_id = st.session_state.get("current_ticket_id")
+            if ticket_id:
+                update_ticket_status(ticket_id, "escalated")
+                add_ticket_event(ticket_id, "assigned", "system", "system", "Assigned to human technician")
+            ticket_record = {"ticket_id": ticket_id}
             st.session_state.chat_history.append(AIMessage(f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Ticket ID: #{ticket_id}"))
             st.session_state.technician_assign = True
             st.session_state.awaiting_technician_confirmation = False
@@ -658,12 +938,22 @@ else:
         st.session_state.awaiting_technician_confirmation = False
         st.session_state.technician_assign = False
         
+        # Append to chat history (UI)
         st.session_state.chat_history.append(HumanMessage(user_query))
         with st.chat_message("Human"):
             st.markdown(user_query)
+
+        # handle user query (this will also create/update ticket title/description and append conversation)
         with st.chat_message("AI"):
             ai_stream, should_show_buttons = handle_user_query(user_query)
             final = st.write_stream(ai_stream)
+            # Save AI reply to conversation as well
             st.session_state.chat_history.append(AIMessage(final))
+            # Append agent message to conversation doc
+            ticket_id = st.session_state.get("current_ticket_id")
+            if ticket_id:
+                agent_msg_payload = build_conversation_payload(ticket_id, final, is_user=False)
+                add_conversation_message(ticket_id, agent_msg_payload)
+                add_ticket_event(ticket_id, "agent_reply", "agent", "agent_ai_01", final)
             st.session_state.show_buttons = should_show_buttons
         st.rerun()
