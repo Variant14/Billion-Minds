@@ -487,11 +487,11 @@ Respond in STRICT JSON ONLY:
     except:
         return {"title": "Untitled Issue", "description": issue_context}
 
-def update_ticket_resolve(ticketId):
+def update_ticket(payload):
     st.sidebar.write("Debug: Updating Case to resolve")
 
-def create_ticket(payload):
-    st.sidebar.write("Debug: Creating ticket")
+def create_ticket():
+    st.sidebar.write("Debug: Creating ticket, return id")
 
 def assign_to_technician(ticketId):
     st.sidebar.write("Debug: Assigning the Ticket to technician")
@@ -524,7 +524,8 @@ def build_conversation_payload(ticketId, message, isUser):
         "message": message
     }
     st.sidebar.write(conversation_payload)
-    return conversation_payload
+    create_conversation(conversation_payload)
+    #return conversation_payload
 
 def create_conversation(payload):
     """Placeholder function to log the conversation payload to a database."""
@@ -547,11 +548,11 @@ st.info("This conversation will be stored in our database.")
 if not st.session_state.greeted:
     current = st.session_state.current_user
     user_name = st.session_state.users[current]["name"] if current else "there"
+    st.session_state.ticketId = create_ticket()
     greeting = f"Hello {user_name}! 👋 I'm your IT Support Assistant. How can I help you today?"
     
     # --- LOGGING AI GREETING ---
-    payload = build_conversation_payload(st.session_state.ticketId, greeting, False)
-    create_conversation(payload)
+    build_conversation_payload(st.session_state.ticketId, greeting, False)
     
     st.session_state.chat_history.append(AIMessage(greeting))
     st.session_state.greeted = True
@@ -570,8 +571,8 @@ if st.session_state.clarification_mode:
     ans = st.chat_input("Answer the clarification question:")
     if ans:
         # --- LOGGING USER ANSWER ---
-        payload = build_conversation_payload(st.session_state.ticketId, ans, True)
-        create_conversation(payload)
+        ticketId = st.session_state.ticketId
+        build_conversation_payload(st.session_state.ticketId, ans, True)
         
         st.session_state.chat_history.append(HumanMessage(ans))
         st.session_state.clarification_answers.append(ans)
@@ -580,8 +581,7 @@ if st.session_state.clarification_mode:
             final = st.write_stream(ai_stream)
             
             # --- LOGGING AI RESPONSE ---
-            payload = build_conversation_payload(st.session_state.ticketId, final, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, final, False)
             
             st.session_state.chat_history.append(AIMessage(final))
             st.session_state.show_buttons = True
@@ -589,8 +589,10 @@ if st.session_state.clarification_mode:
 
 # --- Resolution buttons ---
 elif st.session_state.show_buttons:
+    ticketId = st.session_state.ticketId
     st.markdown("---")
     with st.chat_message("AI"):
+        build_conversation_payload(st.session_state.ticketId,"Was your issue resolved?", False)
         st.markdown("**Was your issue resolved?**")
     col1, col2 = st.columns(2)
     with col1:
@@ -599,14 +601,12 @@ elif st.session_state.show_buttons:
             
             # --- LOGGING USER YES ---
             user_msg = "Yes"
-            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, user_msg, True)
             st.session_state.chat_history.append(HumanMessage(user_msg))
             
             # --- LOGGING AI RESOLVED ---
             ai_msg = "🎉 Glad your issue is resolved!"
-            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, ai_msg, False)
             st.session_state.chat_history.append(AIMessage(ai_msg))
 
             st.session_state.awaiting_technician_confirmation = False
@@ -618,8 +618,7 @@ elif st.session_state.show_buttons:
             
             # --- LOGGING USER NO ---
             user_msg = "No"
-            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, user_msg, True)
             st.session_state.chat_history.append(HumanMessage(user_msg))
             
             # Evaluate if AI can solve the issue
@@ -635,36 +634,38 @@ elif st.session_state.show_buttons:
 
 # --- Show reset option after resolution ---
 elif st.session_state.show_reset_countdown:
+    ticketId = st.session_state.ticketId
     st.markdown("---")
+    build_conversation_payload(st.session_state.ticketId,"✅ Issue Resolved! Thank you for using IT Support.", False)
     st.success("✅ Issue Resolved! Thank you for using IT Support.")
     if st.button("🔄 Start New Conversation"):
+        build_conversation_payload(st.session_state.ticketId,"🔄 Start New Conversation", True)
         reset_chat()
         st.rerun()
 
 # --- AI resolution confirmation ---
 elif st.session_state.awaiting_resolution_confirmation:
+    ticketId = st.session_state.ticketId
     st.markdown("---")
     with st.chat_message("AI"):
+        build_conversation_payload(st.session_state.ticketId, "AI can attempt an automatic fix. Do you want to proceed?" , False)
         st.markdown("**AI can attempt an automatic fix. Do you want to proceed?**")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✅ Proceed with AI fix"):
             # --- LOGGING USER PROCEED ---
             user_msg = "Proceed with AI fix"
-            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, user_msg, True)
             st.session_state.chat_history.append(HumanMessage(user_msg))
             
             # --- LOGGING AI ACKNOWLEDGEMENT ---
             ai_msg_ack = "Proceeding with AI fix"
-            payload = build_conversation_payload(st.session_state.ticketId, ai_msg_ack, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, ai_msg_ack, False)
             st.session_state.chat_history.append(AIMessage(ai_msg_ack))
 
             # --- LOGGING AI AUTOMATION MESSAGE ---
             ai_msg_auto = "Please wait while the chat-bot is running System Automation Checks"
-            payload = build_conversation_payload(st.session_state.ticketId, ai_msg_auto, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, ai_msg_auto, False)
             with st.chat_message("AI"):
                 st.session_state.chat_history.append(AIMessage(ai_msg_auto)) 
             st.session_state.show_buttons = True
@@ -674,14 +675,12 @@ elif st.session_state.awaiting_resolution_confirmation:
         if st.button("❌ Don't proceed"):
             # --- LOGGING USER DON'T PROCEED ---
             user_msg = "No, don't proceed with AI fix"
-            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, user_msg, True)
             st.session_state.chat_history.append(HumanMessage(user_msg))
 
             # --- LOGGING AI ESCALATION PROMPT ---
             ai_msg = "Okay, Would you like to escalate this issue to a human technician?"
-            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, ai_msg, False)
             st.session_state.chat_history.append(AIMessage(ai_msg))
             
             st.session_state.awaiting_resolution_confirmation = False
@@ -690,6 +689,7 @@ elif st.session_state.awaiting_resolution_confirmation:
 
 # --- Technician escalation confirmation ---
 elif st.session_state.awaiting_technician_confirmation:
+    ticketId = st.session_state.ticketId
     st.markdown("---")
     with st.chat_message("AI"):
         st.markdown("**Would you like to escalate this issue to a human technician?**")
@@ -698,16 +698,14 @@ elif st.session_state.awaiting_technician_confirmation:
         if st.button("✅ Yes — Escalate to Technician"):
             # --- LOGGING USER YES ESCALATE ---
             user_msg = "Yes, escalate to technician"
-            payload = build_conversation_payload(st.session_state.ticketId, user_msg, True)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, user_msg, True)
             st.session_state.chat_history.append(HumanMessage(user_msg))
             
-            ticket_id = str(hash(str(st.session_state.chat_history)) % 10000).zfill(4)
-            
+            #ticket_id = str(hash(str(st.session_state.chat_history)) % 10000).zfill(4)
+
             # --- LOGGING AI ESCALATED ---
-            ai_msg = f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Ticket ID: #{ticket_id}"
-            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
-            create_conversation(payload)
+            ai_msg = f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Updated Ticket ID: #{ticketId}"
+            build_conversation_payload(st.session_state.ticketId, ai_msg, False)
             st.session_state.chat_history.append(AIMessage(ai_msg))
 
             st.session_state.technician_assign = True
@@ -723,8 +721,7 @@ elif st.session_state.awaiting_technician_confirmation:
 
             # --- LOGGING AI NEW CHAT PROMPT ---
             ai_msg = "Understood! Let's start fresh. How can I help you today?"
-            payload = build_conversation_payload(st.session_state.ticketId, ai_msg, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, ai_msg, False)
             st.session_state.chat_history.append(AIMessage(ai_msg))
             
             st.session_state.awaiting_technician_confirmation = False
@@ -733,14 +730,19 @@ elif st.session_state.awaiting_technician_confirmation:
 
 # --- After technician assignment ---
 elif st.session_state.technician_assign:
+    ticketId = st.session_state.ticketId
     st.markdown("---")
-    st.success("🎫 Your ticket has been created. A technician will reach out soon.")
+    ai_msg = "🎫 Your ticket has been created. A technician will reach out soon."
+    build_conversation_payload(st.session_state.ticketId, ai_msg, False)
+    st.success(ai_msg)
     if st.button("🔄 Start New Chat"):
+        build_conversation_payload(st.session_state.ticketId,"🔄 Start New Chat" , True)
         reset_chat()
         st.rerun()
 
 # --- Normal chat input ---
 else:
+    ticketId = st.session_state.ticketId
     user_query = st.chat_input("Ask something about IT…")
     if user_query and user_query.strip():
         # Reset escalation states when new query comes in
@@ -749,8 +751,7 @@ else:
         st.session_state.technician_assign = False
         
         # --- LOGGING USER QUERY ---
-        payload = build_conversation_payload(st.session_state.ticketId, user_query, True)
-        create_conversation(payload)
+        build_conversation_payload(st.session_state.ticketId, user_query, True)
         st.session_state.chat_history.append(HumanMessage(user_query))
         
         with st.chat_message("Human"):
@@ -760,8 +761,7 @@ else:
             final = st.write_stream(ai_stream)
             
             # --- LOGGING AI RESPONSE ---
-            payload = build_conversation_payload(st.session_state.ticketId, final, False)
-            create_conversation(payload)
+            build_conversation_payload(st.session_state.ticketId, final, False)
             
             st.session_state.chat_history.append(AIMessage(final))
             st.session_state.show_buttons = should_show_buttons
