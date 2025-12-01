@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 import time
 import json
+import uuid
+from datetime import datetime
 import extra_streamlit_components as stx
 
 # --- LangChain Core ---
@@ -27,6 +29,10 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
+
+# --- Qdrant client for DB (users & tickets) ---
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as rest
 
 # =============================
 # STREAMLIT STATE INITIALIZATION
@@ -63,29 +69,99 @@ if not GEMINI_KEY:
     st.error("GOOGLE_API_KEY missing in .env file. Add it before running.")
     st.stop()
 
-# =============================
-# USERS PERSISTENCE
-# =============================
-USERS_FILE = BASE_DIR / "users.json"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+# Vector dim for small metadata collections (we use dummy 1D vector)
+_METADATA_VECTOR_DIM = 1
 
-def load_users():
-    if USERS_FILE.exists():
-        with open(USERS_FILE, "r") as f:
-            st.session_state.users = json.load(f)
-    else:
+# =============================
+# QDRANT INITIALIZATION (users & tickets)
+# =============================
+try:
+    qdrant = QdrantClient(url=QDRANT_URL)
+except Exception as e:
+    st.error(f"Unable to connect to Qdrant at {QDRANT_URL}: {e}")
+    st.stop()
+
+# Helper to create metadata collections using 1-d dummy vectors
+def ensure_metadata_collection(name: str):
+    try:
+        qdrant.get_collection(name)
+    except Exception:
+        # create collection with 1-d vectors (we'll store payloads, vector set to [0.0])
+        try:
+            qdrant.recreate_collection(
+                collection_name=name,
+                vectors_config=rest.VectorParams(size=_METADATA_VECTOR_DIM, distance=rest.Distance.COSINE),
+            )
+        except Exception as e:
+            st.error(f"Could not create Qdrant collection '{name}': {e}")
+            st.stop()
+
+ensure_metadata_collection("users")
+ensure_metadata_collection("tickets")
+
+# =============================
+# USERS (persisted in Qdrant 'users' collection)
+# =============================
+def load_users_from_qdrant():
+    """Load users from Qdrant into session_state.users (map by email)."""
+    try:
+        users = {}
+        # scroll returns (points, next_page)
+        points, _ = qdrant.scroll(collection_name="users", limit=1000)
+        for point in points:
+            payload = point.payload or {}
+            email = payload.get("email")
+            if email:
+                users[email] = payload
+        st.session_state.users = users
+    except Exception as e:
         st.session_state.users = {}
+        st.warning(f"Could not load users from DB: {e}")
 
-def save_users():
-    with open(USERS_FILE, "w") as f:
-        json.dump(st.session_state.users, f)
 
-load_users()
+def save_user_to_qdrant(user_data: dict):
+    """
+    Save user to Qdrant:
+      - Create a Qdrant-safe UUID as the point id
+      - Keep the email inside the payload (so we can map by email on load)
+    """
+    try:
+        # Ensure email present
+        email = user_data.get("email")
+        if not email:
+            raise ValueError("user_data must include 'email'")
+
+        # Use a UUID as the Qdrant point id (Qdrant requires int or UUID)
+        point_id = str(uuid.uuid4())
+        # Ensure payload contains the email (so load_users_from_qdrant can index by email)
+        user_data_copy = dict(user_data)
+        user_data_copy["qid"] = point_id
+        # Upsert into Qdrant
+        qdrant.upsert(
+            collection_name="users",
+            points=[
+                rest.PointStruct(
+                    id=point_id,
+                    vector=[0.0],  # dummy vector for metadata collection
+                    payload=user_data_copy,
+                )
+            ],
+        )
+    except Exception as e:
+        # Show error but do not crash; caller should handle result
+        st.error(f"Failed to save user to DB: {e}")
+        raise
+
+# initialize users from qdrant
+load_users_from_qdrant()
 
 # =============================
 # COOKIE MANAGER
 # =============================
 cookie_manager = stx.CookieManager()
 current_user_cookie = cookie_manager.get("current_user")
+# If cookie exists and user exists in loaded users, mark authenticated
 if current_user_cookie and current_user_cookie in st.session_state.users:
     st.session_state.authenticated = True
     st.session_state.current_user = current_user_cookie
@@ -103,7 +179,7 @@ def render_auth_ui():
 
         if st.button("Sign In"):
             users = st.session_state.users
-            if email and email in users and users[email]["password"] == password:
+            if email and email in users and users[email].get("password") == password:
                 st.session_state.authenticated = True
                 st.session_state.current_user = email
                 st.session_state.greeted = False
@@ -136,14 +212,34 @@ def render_auth_ui():
         elif email in users:
             st.error("Account already exists.")
         else:
-            users[email] = {"password": password, "name": name, "tier": tier}
-            save_users()
-            st.session_state.authenticated = True
-            st.session_state.current_user = email
-            cookie_manager.set("current_user", email, expires_at=None)
-            st.success(f"Account created! You are now logged in as {name}.")
-            st.session_state.show_register = False
-            st.rerun()
+            user_data = {
+                "email": email,
+                "password": password,
+                "name": name,
+                "tier": tier,
+                "created_at": datetime.utcnow().isoformat()
+            }
+            # Save to Qdrant (will raise and show error if fails)
+            try:
+                save_user_to_qdrant(user_data)
+            except Exception:
+                # save_user_to_qdrant already displayed the error
+                st.stop()
+
+            # Refresh in-memory users map
+            load_users_from_qdrant()
+
+            # Ensure the user is present (sanity)
+            if email in st.session_state.users:
+                st.session_state.authenticated = True
+                st.session_state.current_user = email
+                cookie_manager.set("current_user", email, expires_at=None)
+                st.success(f"Account created! You are now logged in as {name}.")
+                st.session_state.show_register = False
+                st.rerun()
+            else:
+                st.error("Account saved but could not load user. Try again or check DB.")
+                st.stop()
 
     if st.button("Back to Login"):
         st.session_state.show_register = False
@@ -158,8 +254,8 @@ if not st.session_state.authenticated:
 # =============================
 @st.cache_resource
 def setup_rag_pipeline():
-    DATA_PATH = BASE_DIR / "it_docs"
-    CHROMA_PATH = BASE_DIR / "chroma_db"
+    DATA_PATH = BASE_DIR / "src/it_docs"
+    CHROMA_PATH = BASE_DIR / "src/chroma_db"
 
     if not os.path.exists(DATA_PATH) or not os.listdir(DATA_PATH):
         st.warning(f"No documents found in: {DATA_PATH}")
@@ -187,6 +283,58 @@ def setup_rag_pipeline():
     return retriever
 
 retriever = setup_rag_pipeline()
+
+# =============================
+# TICKETS (persisted in Qdrant 'tickets' collection)
+# =============================
+def create_ticket_in_qdrant(user_email: str, chat_history: list, status: str = "Open"):
+    """
+    Create a ticket record in Qdrant 'tickets' collection. Uses UUID4 as id.
+    Stores the chat_history (list of message strings) as payload.
+    """
+    ticket_id = str(uuid.uuid4())
+    ticket_record = {
+        "ticket_id": ticket_id,
+        "user": user_email,
+        "chat_history": chat_history,
+        "status": status,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    try:
+        qdrant.upsert(
+            collection_name="tickets",
+            points=[
+                rest.PointStruct(
+                    id=ticket_id,
+                    vector=[0.0],  # dummy vector for metadata collection
+                    payload=ticket_record
+                )
+            ]
+        )
+    except Exception as e:
+        st.error(f"Failed to create ticket in DB: {e}")
+        return None
+    return ticket_record
+
+def update_ticket_status(ticket_id: str, new_status: str):
+    """
+    Fetch ticket, update status, and upsert back.
+    """
+    try:
+        hits = qdrant.search_points(collection_name="tickets", query_vector=[0.0], limit=1000)
+        for h in hits:
+            payload = h.payload or {}
+            if payload.get("ticket_id") == ticket_id:
+                payload["status"] = new_status
+                payload["updated_at"] = datetime.utcnow().isoformat()
+                qdrant.upsert(
+                    collection_name="tickets",
+                    points=[rest.PointStruct(id=ticket_id, vector=[0.0], payload=payload)]
+                )
+                return payload
+    except Exception as e:
+        st.error(f"Failed to update ticket: {e}")
+    return None
 
 # =============================
 # HELPER FUNCTIONS
@@ -231,12 +379,12 @@ def is_technical_issue(user_query):
         'unable', 'failed', 'crash', 'bug', 'broken', 'slow', 'freeze', 'stuck',
         'help with', 'fix', 'solve', 'troubleshoot', 'install', 'configure',
         'reset', 'password', 'login', 'access', 'connection', 'network', 'syncing', 'migration',
-        'VPN', 'authentication', 'MFA', 'cached credentials', 'VPN profile', 'credential manager',
-        'Outlook', 'mailbox', 'Exchange', 'OST file', 'profile', 'AutoDiscover', 'Cached Exchange Mode',
-        'Docker', 'IDE', 'VS Code', 'CPU', 'RAM', 'memory', 'startup apps', 'graphics driver',
-        'chipset driver', 'BSOD', 'blue screen', 'minidump', 'hardware replacement', 'SSD',
-        'USB', 'peripherals', 'dock', 'firmware', 'power brick', 'boot', 'disk fragmentation', 'sfc',
-        'DISM', 'post-update patches', 'boot logging', 'slow boot', 'performance', 'critical driver'
+        'vpn', 'authentication', 'mfa', 'cached credentials', 'vpn profile', 'credential manager',
+        'outlook', 'mailbox', 'exchange', 'ost file', 'profile', 'autodiscover', 'cached exchange mode',
+        'docker', 'ide', 'vs code', 'cpu', 'ram', 'memory', 'startup apps', 'graphics driver',
+        'chipset driver', 'bsod', 'blue screen', 'minidump', 'hardware replacement', 'ssd',
+        'usb', 'peripherals', 'dock', 'firmware', 'power brick', 'boot', 'disk fragmentation', 'sfc',
+        'dism', 'post-update patches', 'boot logging', 'slow boot', 'performance', 'critical driver'
     ]
     
     return any(keyword in query_lower for keyword in technical_keywords)
@@ -262,7 +410,7 @@ Do NOT provide a solution.
     return questions[:5]
 
 def get_rag_answer(user_query, context_override=None, is_technical=True):
-    context_docs = retriever.get_relevant_documents(user_query) if retriever else []
+    context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     context_text = combine_documents(context_docs) if context_docs else ""
     if context_override:
         context_text += "\n\n" + context_override
@@ -275,7 +423,7 @@ If context is insufficient, be professional and helpful.
 Provide step-by-step troubleshooting when addressing technical issues.
 
 CONTEXT:
----------
+--------- 
 {context}
 ---------
 
@@ -315,9 +463,11 @@ def handle_user_query(user_query):
         return get_rag_answer(user_query, is_technical=False), False
     
     # For technical issues, check context
-    context_docs = retriever.get_relevant_documents(user_query) if retriever else []
+    context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     context_text = combine_documents(context_docs) if context_docs else ""
 
+    # Save chat snapshot to session (ticket creation later when needed)
+    # If KB context insufficient, trigger clarifications
     if len(context_text) < 200:
         st.session_state.clarification_mode = True
         st.session_state.clarification_index = 0
@@ -339,7 +489,7 @@ Respond with ONLY ONE WORD:
 - "AI_SOLVABLE" if the issue can be resolved through automated steps, scripts, or configuration changes
 - "HUMAN_NEEDED" if the issue requires physical access, hardware replacement, complex judgment, or escalated permissions
 
-Your response:"""
+Your response:""" 
 
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, api_key=GEMINI_KEY)
@@ -374,7 +524,8 @@ st.info("This conversation will be stored in our database.")
 # greet
 if not st.session_state.greeted:
     current = st.session_state.current_user
-    user_name = st.session_state.users[current]["name"] if current else "there"
+    user_obj = st.session_state.users.get(current)
+    user_name = user_obj.get("name", "there") if user_obj else "there"
     greeting = f"Hello {user_name}! 👋 I'm your IT Support Assistant. How can I help you today?"
     st.session_state.chat_history.append(AIMessage(greeting))
     st.session_state.greeted = True
@@ -410,10 +561,16 @@ elif st.session_state.show_buttons:
     with col1:
         if st.button("✅ Yes — Resolved"):
             st.session_state.show_buttons = False
+            # Persist resolved ticket into Qdrant tickets collection
+            ticket = create_ticket_in_qdrant(
+                user_email=st.session_state.current_user,
+                chat_history=[m.content for m in st.session_state.chat_history],
+                status="Resolved"
+            )
             st.session_state.chat_history.append(HumanMessage("Yes"))
             st.session_state.chat_history.append(AIMessage("🎉 Glad your issue is resolved! Feel free to ask if you have any other questions."))
             st.session_state.chat_history.append(AIMessage("Resetting the chat to start a new conversation!"))
-            time.sleep(3)
+            time.sleep(2)
             st.session_state.awaiting_technician_confirmation = False
             reset_chat()
             st.rerun()
@@ -465,7 +622,13 @@ elif st.session_state.awaiting_technician_confirmation:
     with col1:
         if st.button("✅ Yes — Escalate to Technician"):
             st.session_state.chat_history.append(HumanMessage("Yes, escalate to technician"))
-            ticket_id = str(hash(str(st.session_state.chat_history)) % 10000).zfill(4)
+            # Create ticket and persist to Qdrant
+            ticket_record = create_ticket_in_qdrant(
+                user_email=st.session_state.current_user,
+                chat_history=[m.content for m in st.session_state.chat_history],
+                status="Escalated"
+            )
+            ticket_id = ticket_record["ticket_id"] if ticket_record else "unknown"
             st.session_state.chat_history.append(AIMessage(f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Ticket ID: #{ticket_id}"))
             st.session_state.technician_assign = True
             st.session_state.awaiting_technician_confirmation = False
