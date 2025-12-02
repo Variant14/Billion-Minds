@@ -175,15 +175,6 @@ def save_user_to_qdrant(user_data: dict):
 # initialize users from qdrant
 load_users_from_qdrant()
 
-# =============================
-# COOKIE MANAGER
-# =============================
-cookie_manager = stx.CookieManager()
-current_user_cookie = cookie_manager.get("current_user")
-# If cookie exists and user exists in loaded users, mark authenticated
-if current_user_cookie and current_user_cookie in st.session_state.users:
-    st.session_state.authenticated = True
-    st.session_state.current_user = current_user_cookie
 
 # =============================
 # Initialize User History
@@ -419,7 +410,7 @@ def display_user_history(user_id):
             # Truncate long issue titles
             if len(issue) > 40:
                 issue = issue[:40] + "..."
-            st.sidebar.markdown(f"{status} **{ticket.get('ticket_id', 'N/A')[:8]}...**: {issue}")
+            st.sidebar.markdown(f"{status} **{issue}**")
     else:
         st.sidebar.info("No tickets yet")
     
@@ -491,6 +482,38 @@ def record_login(user_id):
         }
         update_user_history(user_id, updates)
 
+
+
+# =============================
+# COOKIE MANAGER
+# =============================
+# cookie_manager = stx.CookieManager()
+# current_user_cookie = cookie_manager.get("current_user")
+# # If cookie exists and user exists in loaded users, mark authenticated
+# if current_user_cookie and current_user_cookie in st.session_state.users:
+#     st.session_state.authenticated = True
+#     st.session_state.current_user = current_user_cookie
+
+# COOKIE MANAGER
+cookie_manager = stx.CookieManager()
+current_user_cookie = cookie_manager.get("current_user")
+
+if current_user_cookie:
+    # Always reload users from Qdrant in case session state reset
+    load_users_from_qdrant()
+    
+    if current_user_cookie in st.session_state.users:
+        st.session_state.authenticated = True
+        st.session_state.current_user = current_user_cookie
+        # Ensure user history exists
+        history = get_user_history(current_user_cookie)
+        if not history:
+            user_data = st.session_state.users.get(current_user_cookie, {})
+            initialize_user_history(
+                current_user_cookie,
+                user_data.get("name", "Unknown"),
+                user_data.get("tier", "staff")
+            )
 
 
 # =============================
@@ -625,6 +648,54 @@ retriever = setup_rag_pipeline()
 # =============================
 # Utility: Title + Description generator (LLM)
 # =============================
+# def get_title_description(issue_context: str):
+#     """
+#     Uses Gemini to generate a title and description for the ticket.
+#     Ensures we always return both fields.
+#     """
+#     template = """
+# You are an IT Support AI evaluator. Based on the issue described below,
+# generate a clear ticket title and a detailed but concise description.
+
+# Issue:
+# {context}
+
+# Respond in STRICT JSON ONLY:
+# {
+#     "title": "",
+#     "description": ""
+# }
+# """
+#     prompt = ChatPromptTemplate.from_template(template)
+
+#     llm = ChatGoogleGenerativeAI(
+#         model="gemini-2.5-flash",
+#         temperature=0.2,
+#         api_key=GEMINI_KEY
+#     )
+
+#     chain = prompt | llm | StrOutputParser()
+#     try:
+#         raw = chain.invoke({"context": issue_context}).strip()
+#     except Exception as e:
+#         # fallback
+#         return {"title": "Untitled Issue", "description": issue_context}
+
+#     json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+
+#     if not json_match:
+#         return {"title": "Untitled Issue", "description": issue_context}
+
+#     try:
+#         data = json.loads(json_match.group(0))
+#         return {
+#             "title": data.get("title", "Untitled Issue"),
+#             "description": data.get("description", issue_context)
+#         }
+#     except Exception:
+#         return {"title": "Untitled Issue", "description": issue_context}
+
+
 def get_title_description(issue_context: str):
     """
     Uses Gemini to generate a title and description for the ticket.
@@ -638,10 +709,10 @@ Issue:
 {context}
 
 Respond in STRICT JSON ONLY:
-{
+{{
     "title": "",
     "description": ""
-}
+}}
 """
     prompt = ChatPromptTemplate.from_template(template)
 
@@ -671,6 +742,156 @@ Respond in STRICT JSON ONLY:
         }
     except Exception:
         return {"title": "Untitled Issue", "description": issue_context}
+    
+
+
+def upsert_ticket_vector(ticket_id: str, text: str):
+    """
+    Store or update a semantic vector for a ticket in Qdrant.
+    `text` should summarize the ticket (title + description, etc.).
+    """
+    try:
+        emb_model = get_ticket_embedding_model()
+        vector = emb_model.embed_query(text)
+
+        qdrant.upsert(
+            collection_name="ticket_vectors",
+            points=[
+                rest.PointStruct(
+                    id=ticket_id,
+                    vector=vector,
+                    payload={
+                        "ticket_id": ticket_id,
+                        "text": text,
+                    },
+                )
+            ],
+        )
+        logger.info(f"upsert_ticket_vector: stored vector for ticket {ticket_id}")
+    except Exception as e:
+        logger.exception("Failed to upsert ticket vector")
+
+
+def search_similar_tickets(query: str, top_k: int = 3, score_threshold: float = 0.8):
+    """
+    Semantic search over past tickets by user query.
+    Returns a list of Qdrant ScoredPoint objects.
+    """
+    try:
+        emb_model = get_ticket_embedding_model()
+        q_vec = emb_model.embed_query(query)
+
+        results = qdrant.search(
+            collection_name="ticket_vectors",
+            query_vector=q_vec,
+            limit=top_k,
+            with_payload=True,
+            score_threshold=score_threshold,
+        )
+        return results
+    except Exception as e:
+        logger.exception("Ticket vector search failed")
+        return []
+
+def get_title_description_with_ticket_match(issue_context: str):
+    """
+    Like get_title_description, but also:
+    - Checks for a similar past ticket via vector search.
+    - Asks the LLM to return a JSON including matching ticket info:
+        {
+          "title": "",
+          "description": "",
+          "matching_ticket": {
+            "ticket_id": "",
+            "context": ""
+          }
+        }
+    """
+    # 1) Look for similar tickets
+    similar = search_similar_tickets(issue_context, top_k=1, score_threshold=0.8)
+    if similar:
+        best = similar[0]
+        similar_ticket_id = best.payload.get("ticket_id", "")
+        similar_context = best.payload.get("text", "")
+    else:
+        similar_ticket_id = ""
+        similar_context = ""
+
+    template = """
+You are an IT Support AI evaluator.
+
+The user has reported the following issue:
+{context}
+
+Below is the most similar previous ticket we could find.
+This may be empty if there was no sufficiently similar ticket.
+
+SIMILAR_TICKET_ID: {similar_ticket_id}
+SIMILAR_TICKET_CONTEXT:
+{similar_ticket_context}
+
+Your tasks:
+
+1. Generate a clear, human‑readable title for the CURRENT issue only.
+2. Generate a concise 2–4 sentence description for the CURRENT issue only.
+3. If the similar ticket genuinely describes the same underlying problem,
+   include its id and context in the "matching_ticket" object.
+   If there is no useful match, set both fields in "matching_ticket"
+   to empty strings.
+
+Respond in STRICT JSON ONLY using exactly this schema:
+
+{{
+  "title": "",
+  "description": "",
+  "matching_ticket": {{
+    "ticket_id": "",
+    "context": ""
+  }}
+}}
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2,
+        api_key=GEMINI_KEY
+    )
+
+    chain = prompt | llm | StrOutputParser()
+
+    try:
+        raw = chain.invoke({
+            "context": issue_context,
+            "similar_ticket_id": similar_ticket_id or "",
+            "similar_ticket_context": similar_context or "",
+        }).strip()
+    except Exception:
+        # fallback: use basic title/description, no matching_ticket
+        base = get_title_description(issue_context)
+        base["matching_ticket"] = {"ticket_id": "", "context": ""}
+        return base
+
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not json_match:
+        base = get_title_description(issue_context)
+        base["matching_ticket"] = {"ticket_id": "", "context": ""}
+        return base
+
+    try:
+        data = json.loads(json_match.group(0))
+        return {
+            "title": data.get("title", "Untitled Issue"),
+            "description": data.get("description", issue_context),
+            "matching_ticket": {
+                "ticket_id": data.get("matching_ticket", {}).get("ticket_id", "") or similar_ticket_id or "",
+                "context": data.get("matching_ticket", {}).get("context", "") or similar_context or "",
+            },
+        }
+    except Exception:
+        base = get_title_description(issue_context)
+        base["matching_ticket"] = {"ticket_id": "", "context": ""}
+        return base
 
 # =============================
 # Conversation payload builder
