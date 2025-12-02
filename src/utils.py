@@ -9,6 +9,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
 from rag_pipeline import combine_documents # Corrected from relative import
+import re
+# import paramiko
+
 
 # NOTE: GEMINI_KEY will be passed from app.py to handle_user_query
 
@@ -118,7 +121,7 @@ Do NOT provide a solution.
 
 def get_rag_answer(user_query, retriever, GEMINI_KEY, context_override=None, is_technical=True):
     """Retrieves relevant context and generates an AI answer."""
-    context_docs = retriever.get_relevant_documents(user_query) if retriever else []
+    context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     context_text = combine_documents(context_docs) if context_docs else ""
     if context_override:
         context_text += "\n\n" + context_override
@@ -188,7 +191,7 @@ def handle_user_query(user_query, retriever, GEMINI_KEY):
     if not is_technical:
         return get_rag_answer(user_query, retriever, GEMINI_KEY, is_technical=False), False
     
-    context_docs = retriever.get_relevant_documents(user_query) if retriever else []
+    context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     
     # Determine if we need to start clarification mode if there isn't sufficient context in KB
     if len(context_docs) == 0:
@@ -386,3 +389,42 @@ def create_conversation(payload):
     """Placeholder function to log the conversation payload to a database."""
     # st.sidebar.json(payload) # Uncomment to see the full JSON being logged
     pass
+
+
+BLACKLIST_PATTERNS = [
+    r"\brm\b",
+    r"\bdd\b",
+    r"\bmkfs\b",
+    r"\bwipefs\b",
+    r"chmod\s+777",
+    r"kill\s+-9",
+    r">\s*/dev",
+    r"sudo\s+su",
+    r"mkpart",
+    r"fdisk"
+]
+
+
+def is_blacklisted(command: str) -> bool:
+    for pattern in BLACKLIST_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return True
+    return False
+
+
+def ssh_run(command):
+    # host = "192.168.56.102"
+    # username = "lahiru"
+    # password = "Lahiru123"
+    
+    # ssh = paramiko.SSHClient()
+    # ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # ssh.connect(host, username=username, password=password)
+
+    # stdin, stdout, stderr = ssh.exec_command(command)
+    # out = stdout.read().decode()
+    # err = stderr.read().decode()
+    # ssh.close()
+
+    # return out if out else err
+    return f"Simulated execution of command: {command}"

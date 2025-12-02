@@ -28,6 +28,9 @@ from src.utils import (
 # --- LangChain Core Imports ---
 from langchain_core.messages import HumanMessage, AIMessage
 
+# --- Troubleshooting Imports ---
+from src.troublshoot import troubleshoot_node, diagnostics_node, log_collector_node
+
 # =============================
 # INITIALIZATION
 # =============================
@@ -171,31 +174,94 @@ elif st.session_state.awaiting_resolution_confirmation:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✅ Proceed with AI fix"):
-            user_msg = "Proceed with AI fix"
-            build_conversation_payload(ticketId, user_msg, True)
-            st.session_state.chat_history.append(HumanMessage(user_msg))
-            
-            ai_msg_auto = "Please wait while the chat-bot is running System Automation Checks"
-            build_conversation_payload(ticketId, ai_msg_auto, False)
-            st.session_state.show_button = False
-            with st.chat_message("AI"):
-                st.session_state.chat_history.append(AIMessage(ai_msg_auto)) 
-            st.session_state.show_buttons = True
-            st.session_state.awaiting_resolution_confirmation = False
-            st.rerun()
-    with col2:
-        if st.button("❌ Don't proceed"):
-            user_msg = "No, don't proceed with AI fix"
-            build_conversation_payload(ticketId, user_msg, True)
-            st.session_state.chat_history.append(HumanMessage(user_msg))
+            try:
+                user_msg = "Proceed with AI fix"
+                build_conversation_payload(ticketId, user_msg, True)
+                st.session_state.chat_history.append(HumanMessage(user_msg))
+                
+                ai_msg_auto = "Please wait while the chat-bot is running System Automation Checks"
+                build_conversation_payload(ticketId, ai_msg_auto, False)
+                st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                st.session_state.show_buttons = False
+                
+                with st.spinner("🔄 Processing your request..."):
+                    with st.chat_message("AI"):
+                        st.markdown("**AI analyzing logs**")
+                    
+                    # Collect logs
+                    logs = log_collector_node("general")["logs"]
+                    st.markdown("**Logs collected. Running diagnostics...**")
+                    
+                    # Run diagnostics
+                    diagnostics_node_result = diagnostics_node(logs, st.session_state.chat_history)
+                    
+                    # Build AI message with issues and commands
+                    if diagnostics_node_result and "detected_issues" in diagnostics_node_result:
+                        issues = diagnostics_node_result["detected_issues"]
+                        
+                        if issues:
+                            # Display issues in UI
+                            st.markdown("**Issues detected:**")
+                            
+                            # Build formatted message for chat history
+                            issues_message = "**Diagnostic Results:**\n\n**Issues Detected:**\n"
+                            
+                            for idx, issue in enumerate(issues, 1):
+                                issue_text = issue.get('issue', 'Unknown issue')
+                                st.markdown(f"- {issue_text}")
+                                issues_message += f"{idx}. {issue_text}\n"
+                            
+                            # Add suggested commands if available
+                            if any('command' in issue or 'suggested_command' in issue for issue in issues):
+                                issues_message += "\n**Suggested Commands:**\n"
+                                st.markdown("\n**Suggested Commands:**")
+                                
+                                for idx, issue in enumerate(issues, 1):
+                                    command = issue.get('command') or issue.get('suggested_command')
+                                    if command:
+                                        st.code(command, language="bash")
+                                        issues_message += f"{idx}. `{command}`\n"
+                            
+                            # Add to chat history
+                            build_conversation_payload(ticketId, issues_message, False)
+                            st.session_state.chat_history.append(AIMessage(issues_message))
+                        else:
+                            no_issues_msg = "✅ No issues detected. System appears to be functioning normally."
+                            st.info(no_issues_msg)
+                            build_conversation_payload(ticketId, no_issues_msg, False)
+                            st.session_state.chat_history.append(AIMessage(no_issues_msg))
+                    else:
+                        warning_msg = "⚠️ Diagnostics completed but no results were returned."
+                        st.warning(warning_msg)
+                        build_conversation_payload(ticketId, warning_msg, False)
+                        st.session_state.chat_history.append(AIMessage(warning_msg))
+                
+                st.session_state.show_buttons = True
+                st.session_state.awaiting_resolution_confirmation = False
+                
+            except Exception as e:
+                error_msg = f"⚠️ An error occurred during diagnostics: {str(e)}"
+                st.error(error_msg)
+                build_conversation_payload(ticketId, error_msg, False)
+                st.session_state.chat_history.append(AIMessage(error_msg))
+                st.session_state.show_buttons = True
+                st.session_state.awaiting_resolution_confirmation = False
+            finally:
+                st.session_state.processing = False
+                st.rerun()
+        with col2:
+            if st.button("❌ Don't proceed"):
+                user_msg = "No, don't proceed with AI fix"
+                build_conversation_payload(ticketId, user_msg, True)
+                st.session_state.chat_history.append(HumanMessage(user_msg))
 
-            ai_msg = "Okay, Would you like to escalate this issue to a human technician?"
-            build_conversation_payload(ticketId, ai_msg, False)
-            st.session_state.chat_history.append(AIMessage(ai_msg))
-            
-            st.session_state.awaiting_resolution_confirmation = False
-            st.session_state.awaiting_technician_confirmation = True
-            st.rerun()
+                ai_msg = "Okay, Would you like to escalate this issue to a human technician?"
+                build_conversation_payload(ticketId, ai_msg, False)
+                st.session_state.chat_history.append(AIMessage(ai_msg))
+                
+                st.session_state.awaiting_resolution_confirmation = False
+                st.session_state.awaiting_technician_confirmation = True
+                st.rerun()
 
 elif st.session_state.awaiting_technician_confirmation:
     ticketId = st.session_state.ticketId
