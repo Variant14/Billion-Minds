@@ -371,6 +371,7 @@ def build_conversation_payload(ticket_id, message, is_user=True):
 # =============================
 # TICKETS (persisted in Qdrant 'tickets' collection)
 # =============================
+
 def create_ticket():
     """
     Create a placeholder ticket at greet time.
@@ -379,8 +380,10 @@ def create_ticket():
     current_user_email = st.session_state.current_user
     user_obj = st.session_state.users.get(current_user_email, {})
     user_name = user_obj.get("name", "Unknown")
-    ticket_id = str(uuid.uuid4())
 
+    # Correct UUID object (not string)
+    ticket_uuid = uuid.uuid4()
+    ticket_id = str(ticket_uuid)
 
     ticket_payload = {
         "ticket_id": ticket_id,
@@ -402,14 +405,17 @@ def create_ticket():
     try:
         qdrant.upsert(
             collection_name="tickets",
-            points=[rest.PointStruct(
-                id= ticket_id ,
-                vector=[0.0],
-                payload=ticket_payload
-            )]
+            points=[
+                rest.PointStruct(
+                    id=ticket_uuid,   # UUID object required
+                    vector=[0.0],
+                    payload=ticket_payload
+                )
+            ]
         )
-        # initialize the conversation doc in ticket_conversations collection
+
         initialize_ticket_conversation(ticket_id)
+
     except Exception as e:
         st.error(f"Failed to create ticket in DB: {e}")
         return None
@@ -417,6 +423,8 @@ def create_ticket():
     st.session_state.current_ticket_id = ticket_id
     st.session_state.ticket_created = True
     return ticket_payload
+
+
 
 def get_all_tickets():
     tickets = []
@@ -698,55 +706,62 @@ User message: {user_question}
     return rag_chain.stream({"user_question": user_query})
 
 def handle_user_query(user_query):
+
     ticket_id = st.session_state.get("current_ticket_id")
-    ticket_payload = None
+    if not ticket_id:
+        st.error("Ticket not initialized. Call create_ticket() at greet.")
+        return "Ticket not initialized.", False
 
-    if ticket_id:
-        points, _ = qdrant.scroll(collection_name="tickets", limit=1000)
-        for p in points:
-            payload = p.payload or {}
-            if payload.get("ticket_id") == ticket_id:
-                ticket_payload = payload
-                break
+    # Retrieve ticket directly using UUID
+    try:
+        result = qdrant.retrieve(
+            collection_name="tickets",
+            ids=[uuid.UUID(ticket_id)]
+        )
 
-    # First significant user message: generate title/description if empty
+        ticket_payload = result[0].payload if result else None
+
+    except Exception as e:
+        st.error(f"Ticket load failed: {e}")
+        return "Error loading ticket.", False
+
+    # First technical message → generate title & description
     if ticket_payload and not ticket_payload.get("title"):
         td = get_title_description(user_query)
+
         update_ticket_metadata(ticket_id, {
             "title": td["title"],
             "description": td["description"],
-            "created_at": ticket_payload.get("created_at", datetime.utcnow().isoformat() + "Z")
+            "created_at": ticket_payload["created_at"]
         })
-        add_ticket_event(ticket_id, "created", "system", "system", "Ticket created from initial user message.")
 
-    # Append user's message to conversation
-    if ticket_id:
-        user_msg_payload = build_conversation_payload(ticket_id, user_query, is_user=True)
-        add_conversation_message(ticket_id, user_msg_payload)
-        add_ticket_event(ticket_id, "message", "user", st.session_state.current_user, user_query)
+        add_ticket_event(ticket_id, "created", "system", "system",
+                         "Ticket created from initial user message.")
 
-    # Rest of your logic for RAG, clarifications, etc...
+    # Save user message
+    user_msg_payload = build_conversation_payload(ticket_id, user_query, is_user=True)
+    add_conversation_message(ticket_id, user_msg_payload)
+    add_ticket_event(ticket_id, "message", "user", st.session_state.current_user, user_query)
 
-    # Check technical classification
+    # Technical classification
     is_technical = is_technical_issue(user_query)
-    
+
     if not is_technical:
-        # For casual conversation, no buttons needed
         return get_rag_answer(user_query, is_technical=False), False
-    
-    # For technical issues, check context
+
+    # Knowledge base search (will replace later with new KB collection)
     context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
     context_text = combine_documents(context_docs) if context_docs else ""
 
-    # If KB context insufficient, trigger clarifications
+    # Trigger clarifications
     if len(context_text) < 200:
         st.session_state.clarification_mode = True
         st.session_state.clarification_index = 0
         st.session_state.clarification_questions = generate_clarification_questions(user_query)
         st.session_state.clarification_answers = []
-        # return first clarification question
+
         return iter([st.session_state.clarification_questions[0]]), False
-    
+
     st.session_state.clarification_mode = False
     return get_rag_answer(user_query, is_technical=True), True
 
