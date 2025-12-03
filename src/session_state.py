@@ -20,8 +20,8 @@ DEFAULTS = {
     "current_user": None,
     "show_reset_countdown": False,
     "ticket_created":False,
-    "ticket":[],
-    "ticketId": "Test"
+    "current_ticket_id": None,
+    "ticket_created": False,
 }
 
 def initialize_session_state():

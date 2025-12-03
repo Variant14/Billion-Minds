@@ -82,15 +82,34 @@ def render_auth_ui():
         elif email in users:
             st.error("Account already exists.")
         else:
-            users[email] = {"password": password, "name": name, "tier": tier}
-            save_users()
-            st.session_state.authenticated = True
-            st.session_state.current_user = email
-            if cookie_manager:
+            user_data = {
+                "email": email,
+                "password": password,
+                "name": name,
+                "tier": tier,
+                "created_at": datetime.utcnow().isoformat()
+            }
+            # Save to Qdrant (will raise and show error if fails)
+            try:
+                save_user_to_qdrant(user_data)
+            except Exception:
+                # save_user_to_qdrant already displayed the error
+                st.stop()
+
+            # Refresh in-memory users map
+            load_users_from_qdrant()
+
+            # Ensure the user is present (sanity)
+            if email in st.session_state.users:
+                st.session_state.authenticated = True
+                st.session_state.current_user = email
                 cookie_manager.set("current_user", email, expires_at=None)
-            st.success(f"Account created! You are now logged in as {name}.")
-            st.session_state.show_register = False
-            st.rerun()
+                st.success(f"Account created! You are now logged in as {name}.")
+                st.session_state.show_register = False
+                st.rerun()
+            else:
+                st.error("Account saved but could not load user. Try again or check DB.")
+                st.stop()
 
     if st.button("Back to Login"):
         st.session_state.show_register = False

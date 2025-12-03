@@ -25,8 +25,8 @@ def reset_chat():
     st.session_state.technician_assign = False
     st.session_state.greeted = False
     st.session_state.show_reset_countdown = False
+    st.session_state.current_ticket_id = None
     st.session_state.ticket_created = False
-    st.session_state.ticket = []
 
 def is_technical_issue(user_query):
     """Detect if user query is a technical issue that needs resolution"""
@@ -182,6 +182,42 @@ def get_next_clarification(retriever, GEMINI_KEY):
 
 def handle_user_query(user_query, retriever, GEMINI_KEY):
     """Main logic to process a user query, deciding between casual, RAG, or clarification mode."""
+    ticket_id = st.session_state.get("current_ticket_id")
+    if not ticket_id:
+        st.error("Ticket not initialized. Call create_ticket() at greet.")
+        return "Ticket not initialized.", False
+
+    # Retrieve ticket directly using UUID
+    try:
+        result = qdrant.retrieve(
+            collection_name="tickets",
+            ids=[uuid.UUID(ticket_id)]
+        )
+
+        ticket_payload = result[0].payload if result else None
+
+    except Exception as e:
+        st.error(f"Ticket load failed: {e}")
+        return "Error loading ticket.", False
+
+    # First technical message → generate title & description
+    if ticket_payload and not ticket_payload.get("title"):
+        td = get_title_description(user_query)
+
+        update_ticket_metadata(ticket_id, {
+            "title": td["title"],
+            "description": td["description"],
+            "created_at": ticket_payload["created_at"]
+        })
+
+        add_ticket_event(ticket_id, "created", "system", "system",
+                         "Ticket created from initial user message.")
+
+    # Save user message
+    user_msg_payload = build_conversation_payload(ticket_id, user_query, is_user=True)
+    add_conversation_message(ticket_id, user_msg_payload)
+    add_ticket_event(ticket_id, "message", "user", st.session_state.current_user, user_query)
+
     # Check if this is a technical issue
     is_technical = is_technical_issue(user_query)
     
@@ -191,44 +227,14 @@ def handle_user_query(user_query, retriever, GEMINI_KEY):
     context_docs = retriever.get_relevant_documents(user_query) if retriever else []
     
     # Determine if we need to start clarification mode if there isn't sufficient context in KB
-    if len(context_docs) == 0:
+    if len(context_docs) == 200:
         st.session_sttate.clarification_mode = True
         st.session_sate.clarification_index = 0
         st.session_state.clarification_questions = generate_clarification_questions(user_query, GEMINI_KEY)
         st.session_state.clarification_answers = []
         return iter([st.session_state.clarification_questions[0]]), False
     
-    # If we have context, try to resolve and update the ticket
     st.session_state.clarification_mode = False
-    
-    if not st.session_state.ticket_created:
-        should_create_ticket = True
-        st.session_state.ticket_created = True
-        
-        category = classify_category(user_query, GEMINI_KEY)
-        current = st.session_state.current_user
-        user_name = st.session_state.users[current]["name"]
-        ticket_data = get_title_description(user_query, GEMINI_KEY)
-        title = ticket_data.get("title","Untitled Issue")
-        description = ticket_data.get("description","")
-        
-        st.session_state.ticket ={
-            "id": "",     
-            "title": title,
-            "user_id": current,
-            "user_name": user_name,
-            "description": description,
-            "priority": 2, # Default
-            "status": "open",
-            "urgency": "medium",
-            "category": category,
-            "knowledge_base_id": "",
-            "assigned_to": "agent_ai_01",
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "resolved_at": "",
-            "is_resolved": False
-        }
-
     # Return RAG answer and indicate buttons should be shown after stream finishes
     return get_rag_answer(user_query, retriever, GEMINI_KEY, is_technical=True), True
 
@@ -318,7 +324,6 @@ Respond with ONLY in strict JSON:
         st.sidebar.error(f"Unexpected error in AI Eval: {e}")
         return False
 
-
 def classify_category(issue_context, GEMINI_KEY):
     """Classifies the issue into a predefined category."""
     template = """
@@ -342,19 +347,6 @@ Your response:
 
     return result.split()[0].capitalize()
 
-def update_ticket(payload):
-    """Placeholder function to update a ticket status."""
-    st.sidebar.write("Debug: Updating Case to resolve")
-
-def create_ticket():
-    """Placeholder function to create a ticket and return a dummy ID."""
-    # call the api
-    return "TKT-" + str(int(datetime.now().timestamp() * 1000) % 10000).zfill(4)
-
-def assign_to_technician(ticketId):
-    """Placeholder function to assign a ticket."""
-    st.sidebar.write(f"Debug: Assigning Ticket #{ticketId} to technician")
-
 
 def build_conversation_payload(ticketId, message, isUser):
     """
@@ -373,16 +365,10 @@ def build_conversation_payload(ticketId, message, isUser):
         sender_name = "AI Support Agent"
 
     conversation_payload = {
-        "ticketId": ticketId,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "sender_type": sender_type,
         "sender_id": sender_id,
         "sender_name": sender_name,
         "message": message
     }
-    create_conversation(conversation_payload)
-
-def create_conversation(payload):
-    """Placeholder function to log the conversation payload to a database."""
-    # st.sidebar.json(payload) # Uncomment to see the full JSON being logged
-    pass
+    return conversation_payload
