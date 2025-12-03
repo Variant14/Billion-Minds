@@ -8,7 +8,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
-from rag_pipeline import combine_documents # Corrected from relative import
+from rag_pipeline import combine_documents
+from src.qdrant import (
+    retrieve_ticket_byid
+)
 
 # NOTE: GEMINI_KEY will be passed from app.py to handle_user_query
 
@@ -189,13 +192,7 @@ def handle_user_query(user_query, retriever, GEMINI_KEY):
 
     # Retrieve ticket directly using UUID
     try:
-        result = qdrant.retrieve(
-            collection_name="tickets",
-            ids=[uuid.UUID(ticket_id)]
-        )
-
-        ticket_payload = result[0].payload if result else None
-
+        ticket_payload = retrieve_ticket_byid(ticket_id)
     except Exception as e:
         st.error(f"Ticket load failed: {e}")
         return "Error loading ticket.", False

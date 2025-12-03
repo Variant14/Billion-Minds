@@ -3,6 +3,11 @@ import json
 import extra_streamlit_components as stx
 from pathlib import Path
 
+from src.qdrant import (
+    load_users_from_qdrant,
+    save_user_to_qdrant
+)
+
 BASE_DIR = Path(__file__).parent.parent
 USERS_FILE = BASE_DIR / "users.json"
 

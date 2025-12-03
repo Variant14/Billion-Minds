@@ -173,7 +173,18 @@ def save_user_to_qdrant(user_data: dict):
         raise
 
 # initialize users from qdrant
-load_users_from_qdrant()
+#load_users_from_qdrant()
+
+def retrieve_ticket_byid(ticketId):
+    try:
+        result = qdrant.retrieve(
+            collection_name="tickets",
+            ids=[uuid.UUID(ticket_id)]
+        )
+        return ticket_payload = result[0].payload if result else None
+    except Exception as e:
+        st.error(f"Ticket load failed: {e}")
+        return "Error loading ticket.", False
 
 # =============================
 # COOKIE MANAGER

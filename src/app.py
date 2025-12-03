@@ -46,6 +46,7 @@ if not GEMINI_KEY:
     st.error("GOOGLE_API_KEY missing in .env file. Add it before running.")
     st.stop()
 
+
 # 1. Initialize State
 initialize_session_state()
 
