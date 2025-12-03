@@ -57,8 +57,16 @@ def render_auth_ui():
                 st.session_state.authenticated = True
                 st.session_state.current_user = email
                 st.session_state.greeted = False
-                if cookie_manager:
-                    cookie_manager.set("current_user", email, expires_at=None)
+                cookie_manager.set("current_user", email, expires_at=None)
+                history = get_user_history(email)
+                if not history:
+                    user_data = users[email]
+                    initialize_user_history(
+                        email,
+                        user_data.get("name", "Unknown"),
+                        user_data.get("tier", "staff")
+                    )   
+                record_login(email)
                 st.rerun()
             else:
                 st.error("Invalid email or password.")
@@ -109,6 +117,7 @@ def render_auth_ui():
                 st.session_state.authenticated = True
                 st.session_state.current_user = email
                 cookie_manager.set("current_user", email, expires_at=None)
+                initialize_user_history(email, name, tier)
                 st.success(f"Account created! You are now logged in as {name}.")
                 st.session_state.show_register = False
                 st.rerun()

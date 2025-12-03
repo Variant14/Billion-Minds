@@ -53,6 +53,7 @@ initialize_session_state()
 ensure_metadata_collection("users")
 ensure_metadata_collection("tickets")
 ensure_metadata_collection("ticket_conversations")
+ensure_metadata_collection("user_history")
 
 load_users_from_qdrant()
 
@@ -82,6 +83,28 @@ st.info("""
 A ticket will be created for each technical conversation.
 This conversation will be stored in our database.
 """)
+
+# Display user history in sidebar
+if st.session_state.authenticated:
+    display_user_history(st.session_state.current_user)
+    st.sidebar.markdown("---")
+    
+    # Add logout button
+    if st.sidebar.button("🚪 Logout", key="logout_btn"):
+     # Set cookie to expire immediately (more reliable than delete)
+        import datetime
+        cookie_manager.set(
+         "current_user",
+         "",
+            expires_at=datetime.datetime.now() + datetime.timedelta(seconds=-1)
+        )
+    
+        # Clear ALL session state
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+    
+        # Rerun to show login page
+        st.rerun()
 
 #START
 if not st.session_state.greeted:
@@ -138,8 +161,19 @@ elif st.session_state.show_buttons:
             st.session_state.show_buttons = False
             ticket_id = st.session_state.get("current_ticket_id")
             if ticket_id:
+                # Get ticket details before updating
+                points, _ = qdrant.scroll(collection_name="tickets", limit=1000)
+                ticket_title = "Issue"
+                for p in points:
+                    payload = p.payload or {}
+                    if payload.get("ticket_id") == ticket_id:
+                        ticket_title = payload.get("title", "Issue")
+                        break
                 update_ticket_status(ticket_id, "resolved")
                 add_ticket_event(ticket_id, "resolved", "agent", "agent_ai_01", "Ticket resolved by agent/AI.")
+                add_ticket_to_history(st.session_state.current_user, ticket_id, ticket_title, True)  # NEW LINE
+                calculate_metrics(st.session_state.current_user)
+
             user_msg = "Yes, issue resolved."
             add_conversation_message(ticket_id, build_conversation_payload(ticketId, user_msg, True))
             st.session_state.chat_history.append(HumanMessage(user_msg))

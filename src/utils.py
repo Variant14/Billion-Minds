@@ -369,3 +369,109 @@ def build_conversation_payload(ticketId, message, isUser):
         "message": message
     }
     return conversation_payload
+
+def get_title_description_with_ticket_match(issue_context: str):
+    """
+    Like get_title_description, but also:
+    - Checks for a similar past ticket via vector search.
+    - Asks the LLM to return a JSON including matching ticket info:
+        {
+          "title": "",
+          "description": "",
+          "matching_ticket": {
+            "ticket_id": "",
+            "context": ""
+          }
+        }
+    """
+    # 1) Look for similar tickets
+    similar = search_similar_tickets(issue_context, top_k=1, score_threshold=0.8)
+    if similar:
+        best = similar[0]
+        similar_ticket_id = best.payload.get("ticket_id", "")
+        similar_context = best.payload.get("text", "")
+    else:
+        similar_ticket_id = ""
+        similar_context = ""
+
+    template = """
+You are an IT Support AI evaluator.
+
+The user has reported the following issue:
+{context}
+
+Below is the most similar previous ticket we could find.
+This may be empty if there was no sufficiently similar ticket.
+
+SIMILAR_TICKET_ID: {similar_ticket_id}
+SIMILAR_TICKET_CONTEXT:
+{similar_ticket_context}
+
+Your tasks:
+
+1. Generate a clear, human‑readable title for the CURRENT issue only.
+2. Generate a concise 2–4 sentence description for the CURRENT issue only.
+3. If the similar ticket genuinely describes the same underlying problem,
+   include its id and context in the "matching_ticket" object.
+   If there is no useful match, set both fields in "matching_ticket"
+   to empty strings.
+
+Respond in STRICT JSON ONLY using exactly this schema:
+
+{{
+  "title": "",
+  "description": "",
+  "matching_ticket": {{
+    "ticket_id": "",
+    "context": ""
+  }}
+}}
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2,
+        api_key=GEMINI_KEY
+    )
+
+    chain = prompt | llm | StrOutputParser()
+
+    try:
+        raw = chain.invoke({
+            "context": issue_context,
+            "similar_ticket_id": similar_ticket_id or "",
+            "similar_ticket_context": similar_context or "",
+        }).strip()
+    except Exception:
+        # fallback: use basic title/description, no matching_ticket
+        base = get_title_description(issue_context)
+        base["matching_ticket"] = {"ticket_id": "", "context": ""}
+        return base
+
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not json_match:
+        base = get_title_description(issue_context)
+        base["matching_ticket"] = {"ticket_id": "", "context": ""}
+        return base
+
+    try:
+        data = json.loads(json_match.group(0))
+        return {
+            "title": data.get("title", "Untitled Issue"),
+            "description": data.get("description", issue_context),
+            "matching_ticket": {
+                "ticket_id": data.get("matching_ticket", {}).get("ticket_id", "") or similar_ticket_id or "",
+                "context": data.get("matching_ticket", {}).get("context", "") or similar_context or "",
+            },
+        }
+    except Exception:
+        base = get_title_description(issue_context)
+        base["matching_ticket"] = {"ticket_id": "", "context": ""}
+        return base
+
+def email_to_uuid(email: str) -> str:
+    """Convert email to deterministic UUID"""
+    import hashlib
+    hash_obj = hashlib.md5(email.encode())
+    return str(uuid.UUID(hash_obj.hexdigest()))
