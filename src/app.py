@@ -168,8 +168,10 @@ elif st.session_state.awaiting_resolution_confirmation:
     ticketId = st.session_state.ticketId
     st.markdown("---")
     with st.chat_message("AI"):
-        st.markdown("**AI can attempt an automatic fix. Do you want to proceed?**")
-        build_conversation_payload(ticketId, "AI can attempt an automatic fix. Do you want to proceed?" , False)
+        ai_msg = "AI can attempt an automatic fix. Do you want to proceed?"
+        st.markdown(f"**{ai_msg}**")
+        build_conversation_payload(ticketId, ai_msg , False)
+        st.session_state.chat_history.append(AIMessage(ai_msg))
     
     col1, col2 = st.columns(2)
     with col1:
@@ -186,13 +188,22 @@ elif st.session_state.awaiting_resolution_confirmation:
                 
                 with st.spinner("🔄 Processing your request..."):
                     with st.chat_message("AI"):
-                        st.markdown("**AI analyzing logs**")
+                        ai_msg_auto = "Analyzing logs..."
+                        st.markdown(f"**{ai_msg_auto}**")
+                        st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                        build_conversation_payload(ticketId, ai_msg_auto, False)
                     
                     # Collect logs
                     logs = log_collector_node("general")["logs"]
-                    st.markdown("**Logs collected. Running diagnostics...**")
+                    ai_msg_auto = "Logs collected. Running diagnostics..."
+                    st.markdown(f"**{ai_msg_auto}**")
+                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                    build_conversation_payload(ticketId, ai_msg_auto, False)
+                    
                     
                     # Run diagnostics
+                    ai_msg_auto = "**Running diagnostics...**\n\n"
+                    st.markdown("**Running diagnostics...**")
                     diagnostics_node_result = diagnostics_node(logs, st.session_state.chat_history)
                     
                     # Build AI message with issues and commands
@@ -201,40 +212,58 @@ elif st.session_state.awaiting_resolution_confirmation:
                         
                         if issues:
                             # Display issues in UI
-                            st.markdown("**Issues detected:**")
+                            ai_msg_auto += "Diagnostics completed. Issues detected:\n\n"
+                            st.markdown("**Diagnostics completed. Issues detected:**")
                             
                             # Build formatted message for chat history
-                            issues_message = "**Diagnostic Results:**\n\n**Issues Detected:**\n"
+                            # issues_message = "**Diagnostic Results:**\n\n**Issues Detected:**\n"
                             
                             for idx, issue in enumerate(issues, 1):
                                 issue_text = issue.get('issue', 'Unknown issue')
                                 st.markdown(f" {idx+1}. {issue_text}")
-                                issues_message += f"{idx}. {issue_text}\n"
+                                ai_msg_auto += f"{idx}. {issue_text}\n"
                                 human_intervention = issue.get('human_intervention_needed', False)
                                 if human_intervention:
-                                    issues_message += "   - _Human intervention needed._\n"
-                                    st.warning(f"**Human Intervention Needed:** {issue_text}")
-                            # Add suggested commands if available
-                            # if any('command' in issue or 'suggested_commands' in issue for issue in issues):
-                            #     issues_message += "\n**Suggested Commands:**\n"
-                            #     # st.markdown("\n**Suggested Commands:**")
+                                    ai_msg_auto += "   - _Human intervention needed._\n"
+                                    st.warning(f"**Human Intervention Needed:**")
+                                    
+                                # # Add suggested commands if available
+                                # if issue.get('suggested_commands') is not None and len(issue.get('suggested_commands')) > 0:
+                                #     ai_msg_auto += "\n**Suggested Commands:**\n"
+                                #     st.markdown("\n**Suggested Commands:**")
+                                    
+                                #     for idx, issue in enumerate(issues, 1):
+                                #         command = issue.get('command') or issue.get('suggested_commands')
+                                #         if command:
+                                #             # st.code(command, language="bash")
+                                #             issues_message += f"{idx}. `{command}`\n"
+                                            
                                 
-                            #     for idx, issue in enumerate(issues, 1):
-                            #         command = issue.get('command') or issue.get('suggested_commands')
-                            #         if command:
-                            #             # st.code(command, language="bash")
-                            #             issues_message += f"{idx}. `{command}`\n"
-                            if any('human_intervention_needed' in issue for issue in issues):
-                                issues_message += "\n_⚠️ Some issues require human intervention. Please consider escalating to a technician._\n"
-                                st.warning("⚠️ Some issues require human intervention. Please consider escalating to a technician.")
-                            else:
-                                issues_message += "\n✅ All detected issues have suggested safe commands for resolution.\n"
-                                st.markdown("Troubleshooting starts now...")
-                                # Execute troubleshooting node
+                            if all(issue.get("suggested_commands") is None or len(issue.get("suggested_commands")) == 0 for issue in issues):
+                                ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
+                                st.warning("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.")
+                                build_conversation_payload(ticketId, ai_msg_auto, False)
+                                st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                                # Call for human intervention
                             
-                            # Add to chat history
-                            build_conversation_payload(ticketId, issues_message, False)
-                            st.session_state.chat_history.append(AIMessage(issues_message))
+                            elif any(issue.get("status") == "human_intervention_needed" and idx < len(issues) - idx for idx, issue in enumerate(issues)):
+                                ai_msg_auto += "\n_⚠️ Some critical issues require human intervention. Please consider escalating to a technician._\n"
+                                st.warning("⚠️ Some critical issues require human intervention. Please consider escalating to a technician.")
+                                build_conversation_payload(ticketId, ai_msg_auto, False)
+                                st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                                # Call for human intervention
+        
+                            else:
+                                # Execute troubleshooting node
+                                troubleshoot_result = troubleshoot_node({
+                                    "logs": logs,
+                                    "detected_issues": issues
+                                })
+                                if troubleshoot_result and "summary" in troubleshoot_result:
+                                    ai_msg_auto += "\n**Troubleshooting Summary:**\n"
+                                    st.markdown("**Troubleshooting Summary:**")
+                                    build_conversation_payload(ticketId, ai_msg_auto, False)
+                                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                         else:
                             no_issues_msg = "✅ No issues detected. System appears to be functioning normally."
                             st.info(no_issues_msg)
@@ -264,7 +293,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                 user_msg = "No, don't proceed with AI fix"
                 build_conversation_payload(ticketId, user_msg, True)
                 st.session_state.chat_history.append(HumanMessage(user_msg))
-
+                
                 ai_msg = "Okay, Would you like to escalate this issue to a human technician?"
                 build_conversation_payload(ticketId, ai_msg, False)
                 st.session_state.chat_history.append(AIMessage(ai_msg))
