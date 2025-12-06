@@ -208,19 +208,29 @@ elif st.session_state.awaiting_resolution_confirmation:
                             
                             for idx, issue in enumerate(issues, 1):
                                 issue_text = issue.get('issue', 'Unknown issue')
-                                st.markdown(f"- {issue_text}")
+                                st.markdown(f" {idx+1}. {issue_text}")
                                 issues_message += f"{idx}. {issue_text}\n"
-                            
+                                human_intervention = issue.get('human_intervention_needed', False)
+                                if human_intervention:
+                                    issues_message += "   - _Human intervention needed._\n"
+                                    st.warning(f"**Human Intervention Needed:** {issue_text}")
                             # Add suggested commands if available
-                            if any('command' in issue or 'suggested_commands' in issue for issue in issues):
-                                issues_message += "\n**Suggested Commands:**\n"
-                                st.markdown("\n**Suggested Commands:**")
+                            # if any('command' in issue or 'suggested_commands' in issue for issue in issues):
+                            #     issues_message += "\n**Suggested Commands:**\n"
+                            #     # st.markdown("\n**Suggested Commands:**")
                                 
-                                for idx, issue in enumerate(issues, 1):
-                                    command = issue.get('command') or issue.get('suggested_commands')
-                                    if command:
-                                        st.code(command, language="bash")
-                                        issues_message += f"{idx}. `{command}`\n"
+                            #     for idx, issue in enumerate(issues, 1):
+                            #         command = issue.get('command') or issue.get('suggested_commands')
+                            #         if command:
+                            #             # st.code(command, language="bash")
+                            #             issues_message += f"{idx}. `{command}`\n"
+                            if any('human_intervention_needed' in issue for issue in issues):
+                                issues_message += "\n_⚠️ Some issues require human intervention. Please consider escalating to a technician._\n"
+                                st.warning("⚠️ Some issues require human intervention. Please consider escalating to a technician.")
+                            else:
+                                issues_message += "\n✅ All detected issues have suggested safe commands for resolution.\n"
+                                st.markdown("Troubleshooting starts now...")
+                                # Execute troubleshooting node
                             
                             # Add to chat history
                             build_conversation_payload(ticketId, issues_message, False)

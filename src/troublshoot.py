@@ -1,4 +1,5 @@
 from utils import ssh_run 
+from prompts import SAFE_COMMAND_GENERATION_PROMPT, FIX_COMPARE_PROMPT, ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT
 
 LOG_COMMANDS = {
     "network": [
@@ -29,9 +30,7 @@ def log_collector_node(category):
     print(selected_commands)
 
     logs = {}
-
-    # for key, cmd in LOG_COMMANDS.items():
-    #     collected[key] = ssh_run(cmd, host, username, password)
+    
     for cmd in selected_commands:
         try:
             logs[cmd] = ssh_run(cmd)
@@ -52,47 +51,30 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     )
     
-SAFE_COMMAND_GENERATION_PROMPT = """
-    You are a safe Linux troubleshooting assistant.
-
-    You receive:
-    - System logs: {logs}
-    - Context: {context}
-
-    Your job:
-    1. Identify potential issues in the logs
-    2. Suggest possible SAFE commands to fix these issues
-    3. ALL commands must:
-    - Be non-destructive
-    - CAn restart services
-    - Flush cache
-    - Collect statuses
-    - NEVER delete files, kill random processes, or modify system files
-
-    Allowed command types must be limited to
-    - restarting services
-    - checking status
-    - clearing caches
-    - network resets
-    - restarting NetworkManager
-    - checking disk usage
-    - checking CPU usage
-    - checking memory usage
-    - Identify heavy applications running
-
-    Never go outside these categories.
-
-    CRITICAL: Return ONLY raw JSON with no markdown formatting, no code blocks, no backticks.
-    Just the JSON object starting with {{ and ending with }}. If no issue is found, return nothing!
-
-    Format:
-    {{"issues": [{{"issue": "description with possible solutions", "suggested_commands": [...]}}]}}
-    """
 
 # ------------- Diagnostics Node -------------
 def diagnostics_node(logs, context):
 
     prompt = SAFE_COMMAND_GENERATION_PROMPT.format(
+        logs=json.dumps(logs, indent=2),
+        context=context
+    )
+
+    try:
+        response = llm.invoke(prompt).content
+        if response is None:
+            return {"detected_issues": []}
+        output = json.loads(response)
+        # return structured diagnostics
+        return {"detected_issues": output["issues"]}
+    except Exception as e:
+        print("Error occurred:", e)
+        return {"detected_issues": []}
+
+# ------------- Scanning Node -------------
+def scanning_node(logs, context):
+
+    prompt = ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT.format(
         logs=json.dumps(logs, indent=2),
         context=context
     )
@@ -119,32 +101,6 @@ load_dotenv()
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     )
-
-FIX_COMPARE_PROMPT = """
-You are a Linux system troublshoot verification assistant.
-
-Compare BEFORE logs and AFTER logs.
-
-Identify:
-- Which issues appear fixed
-- Which issues still remain
-- Any new warnings or errors
-
-Before log: {beforeLog}
-After log: {afterLog}
-
-CRITICAL: Return ONLY raw JSON with no markdown formatting, no code blocks, no backticks.
-Just the JSON object starting with {{ and ending with }}.
-
-Format:
-{{
-  "fix_status": "solved" | "partial" | "failed",
-  "issues_fixed": [...],
-  "issues_remaining": [...],
-  "notes": "..."
-}}
-"""
-
 
 def troubleshoot_node(state):
     issues = state.get("detected_issues", [])
