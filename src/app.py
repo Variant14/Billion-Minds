@@ -220,24 +220,14 @@ elif st.session_state.awaiting_resolution_confirmation:
                             
                             for idx, issue in enumerate(issues, 1):
                                 issue_text = issue.get('issue', 'Unknown issue')
-                                st.markdown(f" {idx+1}. {issue_text}")
-                                ai_msg_auto += f"{idx}. {issue_text}\n"
+                                ai_msg_auto += f"{idx}. {issue_text}"
                                 human_intervention = issue.get('human_intervention_needed', False)
                                 if human_intervention:
-                                    ai_msg_auto += "   - _Human intervention needed._\n"
-                                    st.warning(f"**Human Intervention Needed:**")
-                                    
-                                # # Add suggested commands if available
-                                # if issue.get('suggested_commands') is not None and len(issue.get('suggested_commands')) > 0:
-                                #     ai_msg_auto += "\n**Suggested Commands:**\n"
-                                #     st.markdown("\n**Suggested Commands:**")
-                                    
-                                #     for idx, issue in enumerate(issues, 1):
-                                #         command = issue.get('command') or issue.get('suggested_commands')
-                                #         if command:
-                                #             # st.code(command, language="bash")
-                                #             issues_message += f"{idx}. `{command}`\n"
-                                            
+                                    ai_msg_auto += " - Human intervention needed.\n"
+                                    st.markdown(f" {idx}. {issue_text} - Human intervention needed.")
+                                else:
+                                    st.markdown(f" {idx}. {issue_text}")
+                                    ai_msg_auto += "\n"                                           
                                 
                             if all(issue.get("suggested_commands") is None or len(issue.get("suggested_commands")) == 0 for issue in issues):
                                 ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
