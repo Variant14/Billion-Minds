@@ -10,8 +10,31 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
 from rag_pipeline import combine_documents
 from src.qdrant import (
-    retrieve_ticket_byid
+    retrieve_ticket_byid,
+    update_ticket_metadata,
+    add_ticket_event,
+    add_conversation_message,
+    add_ticket_to_history
 )
+
+
+def save_current_ticket_to_history():
+    """Save current ticket to user's past_tickets in history before resetting chat."""
+    ticket_id = st.session_state.get("current_ticket_id")
+    user_id = st.session_state.get("current_user")
+    
+    if ticket_id and user_id:
+        try:
+            ticket_payload = retrieve_ticket_byid(ticket_id)
+            if ticket_payload:
+                title = ticket_payload.get("title", "Untitled Issue")
+                is_resolved = ticket_payload.get("is_resolved", False)
+                add_ticket_to_history(user_id, ticket_id, title, is_resolved)
+        except Exception as e:
+            try:
+                st.warning(f"Could not save ticket to history: {e}")
+            except Exception:
+                pass
 
 # NOTE: GEMINI_KEY will be passed from app.py to handle_user_query
 
@@ -121,7 +144,27 @@ Do NOT provide a solution.
 
 def get_rag_answer(user_query, retriever, GEMINI_KEY, context_override=None, is_technical=True):
     """Retrieves relevant context and generates an AI answer."""
-    context_docs = retriever.get_relevant_documents(user_query) if retriever else []
+    # Robust retrieval to support different retriever implementations
+    context_docs = []
+    if retriever:
+        try:
+            if hasattr(retriever, "get_relevant_documents"):
+                context_docs = retriever.get_relevant_documents(user_query)
+            elif hasattr(retriever, "aget_relevant_documents"):
+                import asyncio
+                context_docs = asyncio.get_event_loop().run_until_complete(
+                    retriever.aget_relevant_documents(user_query)
+                )
+            elif hasattr(retriever, "similarity_search"):
+                context_docs = retriever.similarity_search(user_query, k=3)
+            elif callable(retriever):
+                maybe = retriever(user_query)
+                context_docs = list(maybe) if hasattr(maybe, '__iter__') and not isinstance(maybe, (str, bytes)) else [maybe]
+            else:
+                context_docs = []
+        except Exception:
+            context_docs = []
+
     context_text = combine_documents(context_docs) if context_docs else ""
     if context_override:
         context_text += "\n\n" + context_override
@@ -199,7 +242,7 @@ def handle_user_query(user_query, retriever, GEMINI_KEY):
 
     # First technical message → generate title & description
     if ticket_payload and not ticket_payload.get("title"):
-        td = get_title_description(user_query)
+        td = get_title_description(user_query, GEMINI_KEY)
 
         update_ticket_metadata(ticket_id, {
             "title": td["title"],
@@ -211,7 +254,7 @@ def handle_user_query(user_query, retriever, GEMINI_KEY):
                          "Ticket created from initial user message.")
 
     # Save user message
-    user_msg_payload = build_conversation_payload(ticket_id, user_query, is_user=True)
+    user_msg_payload = build_conversation_payload(ticket_id, user_query, isUser=True)
     add_conversation_message(ticket_id, user_msg_payload)
     add_ticket_event(ticket_id, "message", "user", st.session_state.current_user, user_query)
 
@@ -221,12 +264,36 @@ def handle_user_query(user_query, retriever, GEMINI_KEY):
     if not is_technical:
         return get_rag_answer(user_query, retriever, GEMINI_KEY, is_technical=False), False
     
-    context_docs = retriever.get_relevant_documents(user_query) if retriever else []
-    
+    # Robust retrieval: support different retriever implementations
+    context_docs = []
+    if retriever:
+        try:
+            # Common method name
+            if hasattr(retriever, "get_relevant_documents"):
+                context_docs = retriever.get_relevant_documents(user_query)
+            # Async variant
+            elif hasattr(retriever, "aget_relevant_documents"):
+                import asyncio
+                context_docs = asyncio.get_event_loop().run_until_complete(
+                    retriever.aget_relevant_documents(user_query)
+                )
+            # Chroma-like vectorstores may offer similarity_search
+            elif hasattr(retriever, "similarity_search"):
+                context_docs = retriever.similarity_search(user_query, k=3)
+            # Some retrievers are callable
+            elif callable(retriever):
+                maybe = retriever(user_query)
+                # If returns an iterator or list
+                context_docs = list(maybe) if hasattr(maybe, '__iter__') and not isinstance(maybe, (str, bytes)) else [maybe]
+            else:
+                context_docs = []
+        except Exception:
+            context_docs = []
+
     # Determine if we need to start clarification mode if there isn't sufficient context in KB
-    if len(context_docs) == 200:
-        st.session_sttate.clarification_mode = True
-        st.session_sate.clarification_index = 0
+    if not context_docs:
+        st.session_state.clarification_mode = True
+        st.session_state.clarification_index = 0
         st.session_state.clarification_questions = generate_clarification_questions(user_query, GEMINI_KEY)
         st.session_state.clarification_answers = []
         return iter([st.session_state.clarification_questions[0]]), False

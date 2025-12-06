@@ -1,22 +1,44 @@
+
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
+import os
+import uuid
+import logging
+from datetime import datetime
+import streamlit as st
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# -----------------------------
+# QDRANT CONNECTION
+# -----------------------------
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 if not QDRANT_URL:
-    st.error("QDRANT_URL is missing in .env file. Add it before running.")
-    st.stop()
+    raise RuntimeError("QDRANT_URL is missing in .env file. Add it before running.")
 
 _METADATA_VECTOR_DIM = 1
 
+# Attempt to connect to Qdrant, but do NOT raise at import time.
+# If connection fails, log and set `qdrant = None` so higher-level modules can import.
+qdrant = None
 try:
     qdrant = QdrantClient(url=QDRANT_URL)
+    logger.info(f"Connected to Qdrant at {QDRANT_URL}")
 except Exception as e:
-    st.error(f"Unable to connect to Qdrant at {QDRANT_URL}: {e}")
-    st.stop()
+    logger.exception(f"Unable to connect to Qdrant at {QDRANT_URL}: {e}")
+    qdrant = None
 
+# -----------------------------
+# COLLECTION MANAGEMENT
+# -----------------------------
 
 def ensure_metadata_collection(name: str):
+    if qdrant is None:
+        logger.warning(f"Qdrant client not available; cannot ensure collection '{name}' at import time.")
+        return
     try:
         qdrant.get_collection(name)
     except Exception:
@@ -24,11 +46,20 @@ def ensure_metadata_collection(name: str):
         try:
             qdrant.recreate_collection(
                 collection_name=name,
-                vectors_config=rest.VectorParams(size=_METADATA_VECTOR_DIM, distance=rest.Distance.COSINE),
+                vectors_config=rest.VectorParams(
+                    size=_METADATA_VECTOR_DIM,
+                    distance=rest.Distance.COSINE
+                ),
             )
+            logger.info(f"Created Qdrant collection '{name}'")
         except Exception as e:
-            st.error(f"Could not create Qdrant collection '{name}': {e}")
-            st.stop()
+            logger.exception(f"Could not create Qdrant collection '{name}': {e}")
+            try:
+                st.error(f"Could not create Qdrant collection '{name}': {e}")
+                st.stop()
+            except Exception:
+                # If Streamlit isn't ready, just log
+                pass
 
 #ensure_metadata_collection("users")
 #ensure_metadata_collection("tickets")
@@ -53,8 +84,38 @@ def load_users_from_qdrant():
         st.session_state.users = {}
         st.warning(f"Could not load users from DB: {e}")
 
+
+def save_user_to_qdrant(user_data: dict):
+    try:
+        email = user_data.get("email")
+        if not email:
+            raise ValueError("User email required")
+
+        point_id = str(uuid.uuid4())
+
+        user_payload = dict(user_data)
+        user_payload["qid"] = point_id
+
+        qdrant.upsert(
+            collection_name="users",
+            points=[
+                rest.PointStruct(
+                    id=point_id,
+                    vector=[0.0],
+                    payload=user_payload,
+                )
+            ],
+        )
+
+    except Exception as e:
+        st.error(f"Failed to save user: {e}")
+        raise
+
+
+
+
 def create_ticket():
-     """
+    """
     Create a placeholder ticket at greet time.
     Title/description will be filled on the first user message.
     """
@@ -116,6 +177,16 @@ def get_all_tickets():
     except Exception as e:
         st.error(f"Failed to fetch tickets: {e}")
     return tickets
+
+def update_ticket_status(ticket_id, new_status):
+    updates = {"status": new_status}
+
+    if new_status.lower() in ("resolved", "closed", "closed_by_user"):
+        updates["is_resolved"] = True
+        updates["resolved_at"] = datetime.utcnow().isoformat() + "Z"
+
+    return update_ticket_metadata(ticket_id, updates)
+
 
 def update_ticket_metadata(ticket_id: str, updates: dict):
     """
@@ -181,22 +252,18 @@ def retrieve_ticket_byid(ticketId):
     try:
         result = qdrant.retrieve(
             collection_name="tickets",
-            ids=[uuid.UUID(ticket_id)]
+            ids=[uuid.UUID(ticketId)]
         )
-        return ticket_payload = result[0].payload if result else None
+        return result[0].payload if result else None
     except Exception as e:
         st.error(f"Ticket load failed: {e}")
         return "Error loading ticket.", False
 
 # =============================
-# COOKIE MANAGER
+# COOKIE MANAGER - REMOVED
 # =============================
-cookie_manager = stx.CookieManager()
-current_user_cookie = cookie_manager.get("current_user")
-# If cookie exists and user exists in loaded users, mark authenticated
-if current_user_cookie and current_user_cookie in st.session_state.users:
-    st.session_state.authenticated = True
-    st.session_state.current_user = current_user_cookie
+# Cookie access moved to auth.py check_cookie_auth() function
+# DO NOT access cookies at module import time - causes CookiesNotReady exception
 
 
 def update_ticket_status(ticket_id: str, new_status: str):

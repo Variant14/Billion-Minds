@@ -10,26 +10,35 @@ st.set_page_config(page_title="IT Support Bot", page_icon="💻")
 
 from dotenv import load_dotenv
 from pathlib import Path
+import datetime
 
 # --- LOCAL MODULE IMPORTS ---
 from src.session_state import initialize_session_state
-from src.auth import load_users, check_cookie_auth, render_auth_ui
+from src.auth import load_users, check_cookie_auth, render_auth_ui, cookie_manager
 from src.rag_pipeline import setup_rag_pipeline
 from src.utils import (
     reset_chat,
     handle_user_query,
+    save_current_ticket_to_history,
+    
     get_next_clarification,
     evaluate_ai_capability,
-    build_conversation_payload,
-    create_ticket,
-    assign_to_technician
+    build_conversation_payload
+    
 )
 from src.qdrant import (
     ensure_metadata_collection,
     load_users_from_qdrant,
     add_ticket_event, 
     update_ticket_status,
-    add_conversation_message
+    create_ticket,
+ #   assign_to_technician,
+    add_conversation_message,
+    display_user_history,
+    add_ticket_to_history,
+    calculate_metrics,
+    qdrant,
+    retrieve_ticket_byid
 )
 
 # --- LangChain Core Imports ---
@@ -58,7 +67,8 @@ ensure_metadata_collection("user_history")
 load_users_from_qdrant()
 
 # 2. Load Users and Authenticate via Cookie
-load_users()
+#load_users()
+load_users_from_qdrant()
 check_cookie_auth()
 
 # =============================
@@ -87,17 +97,28 @@ This conversation will be stored in our database.
 # Display user history in sidebar
 if st.session_state.authenticated:
     display_user_history(st.session_state.current_user)
+    # Button to save current ticket to history and start a new chat
+    if st.sidebar.button("🔄 Start New Chat (Save current)", key="start_new_chat_sidebar"):
+        save_current_ticket_to_history()
+        st.sidebar.success("Saved current ticket to history.")
+        reset_chat()
+        st.rerun()
     st.sidebar.markdown("---")
     
     # Add logout button
     if st.sidebar.button("🚪 Logout", key="logout_btn"):
-     # Set cookie to expire immediately (more reliable than delete)
+        # Set cookie to expire immediately (more reliable than delete)
         import datetime
-        cookie_manager.set(
-         "current_user",
-         "",
-            expires_at=datetime.datetime.now() + datetime.timedelta(seconds=-1)
-        )
+        try:
+            if cookie_manager:
+                cookie_manager.set(
+                    "current_user",
+                    "",
+                    expires_at=datetime.datetime.now() + datetime.timedelta(seconds=-1)
+                )
+        except Exception:
+            # If cookies manager isn't available, continue to clear session state
+            pass
     
         # Clear ALL session state
         for key in list(st.session_state.keys()):
@@ -120,7 +141,7 @@ if not st.session_state.greeted:
             add_ticket_event(ticket_payload["ticket_id"], "created", "system", "system", "Ticket placeholder created at greet.")
     ticketId = st.session_state.current_ticket_id
     greeting = f"Hello {user_name}! 👋 I'm your IT Support Assistant. My current Ticket ID for this conversation is **{ticketId}**. How can I help you today?"
-    add_conversation_message(ticket_id, build_conversation_payload(ticketId, greeting, False))
+    add_conversation_message(ticketId, build_conversation_payload(ticketId, greeting, False))
     st.session_state.chat_history.append(AIMessage(greeting))
     st.session_state.greeted = True
     #st.rerun() 
@@ -141,9 +162,24 @@ if st.session_state.clarification_mode:
         st.session_state.chat_history.append(HumanMessage(ans))
         st.session_state.clarification_answers.append(ans)
         with st.chat_message("AI"):
-            ai_stream = get_next_clarification()
-            final = st.write_stream(ai_stream)
-            st.session_state.chat_history.append(AIMessage(final))
+            ai_stream, should_show_buttons = get_next_clarification(retriever, GEMINI_KEY)
+            # Materialize streamed clarification into plain string
+            final_text = ""
+            try:
+                rendered = st.write_stream(ai_stream)
+                if isinstance(rendered, str):
+                    final_text = rendered
+                else:
+                    try:
+                        final_text = "".join([str(x) for x in ai_stream]) if ai_stream is not None else ""
+                    except Exception:
+                        final_text = str(rendered)
+            except Exception:
+                try:
+                    final_text = "".join([str(x) for x in ai_stream]) if ai_stream is not None else ""
+                except Exception:
+                    final_text = ""
+            st.session_state.chat_history.append(AIMessage(final_text))
             st.session_state.show_buttons = True
         st.rerun()
 
@@ -152,7 +188,7 @@ elif st.session_state.show_buttons:
     ticketId = st.session_state.current_ticket_id
     st.markdown("---")
     with st.chat_message("AI"):
-        add_conversation_message(ticket_id, build_conversation_payload(ticketId,"Was your issue resolved?", False))
+        add_conversation_message(ticketId, build_conversation_payload(ticketId,"Was your issue resolved?", False))
         st.markdown("**Was your issue resolved?**")
     
     col1, col2 = st.columns(2)
@@ -209,7 +245,7 @@ elif st.session_state.show_reset_countdown:
     st.markdown("---")
     closing_message = f"✅ Issue Resolved! Ticket ID **{ticketId}** closed. Thank you for using IT Support."
     st.success(closing_message)
-    add_conversation_message(ticket_id, build_conversation_payload(st.session_state.ticketId, closing_message, False))
+    add_conversation_message(ticketId, build_conversation_payload(ticketId, closing_message, False))
     if st.button("🔄 Start New Conversation"):
         reset_chat()
         st.rerun()
@@ -288,6 +324,10 @@ elif st.session_state.awaiting_technician_confirmation:
             st.session_state.chat_history.append(AIMessage(ai_msg))
             
             st.session_state.awaiting_technician_confirmation = False
+            try:
+                save_current_ticket_to_history()
+            except Exception:
+                pass
             reset_chat()
             st.rerun()
 
@@ -297,6 +337,10 @@ elif st.session_state.technician_assign:
     ai_msg = f"🎫 Your ticket **#{ticketId}** has been created. A technician will reach out soon."
     st.success(ai_msg)
     if st.button("🔄 Start New Chat"):
+        try:
+            save_current_ticket_to_history()
+        except Exception:
+            pass
         reset_chat()
         st.rerun()
 
@@ -307,21 +351,40 @@ else:
         st.session_state.awaiting_technician_confirmation = False
         st.session_state.technician_assign = False
 
-        userMessage =build_conversation_payload(st.session_state.ticketId, user_query, True)
-        add_conversation_message(ticket_id, userMessage)
+        userMessage = build_conversation_payload(st.session_state.current_ticket_id, user_query, True)
+        add_conversation_message(st.session_state.current_ticket_id, userMessage)
         st.session_state.chat_history.append(HumanMessage(user_query))
         
         with st.chat_message("Human"):
             st.markdown(user_query)
         with st.chat_message("AI"):
             ai_stream, should_show_buttons = handle_user_query(user_query, retriever,GEMINI_KEY)
-            final = st.write_stream(ai_stream)
-            add_conversation_message(ticket_id,build_conversation_payload(st.session_state.ticketId, final, False))           
-            st.session_state.chat_history.append(AIMessage(final))
+            # Render streaming output and also capture plain text for storage
+            final_text = ""
+            try:
+                rendered = st.write_stream(ai_stream)
+                if isinstance(rendered, str):
+                    final_text = rendered
+                else:
+                    # If render returned a non-string (e.g., StreamingOutput), try to materialize
+                    try:
+                        final_text = "".join([str(x) for x in ai_stream]) if ai_stream is not None else ""
+                    except Exception:
+                        final_text = str(rendered)
+            except Exception:
+                # Fallback: try to consume the iterator directly
+                try:
+                    final_text = "".join([str(x) for x in ai_stream]) if ai_stream is not None else ""
+                except Exception:
+                    final_text = ""
+
+            # Persist and show the AI message using the captured text
+            add_conversation_message(st.session_state.current_ticket_id, build_conversation_payload(st.session_state.current_ticket_id, final_text, False))
+            st.session_state.chat_history.append(AIMessage(final_text))
             ticket_id = st.session_state.get("current_ticket_id")
             if ticket_id:
-                agent_msg_payload = build_conversation_payload(ticket_id, final, is_user=False)
+                agent_msg_payload = build_conversation_payload(ticket_id, final_text, False)
                 add_conversation_message(ticket_id, agent_msg_payload)
-                add_ticket_event(ticket_id, "agent_reply", "agent", "agent_ai_01", final)
+                add_ticket_event(ticket_id, "agent_reply", "agent", "agent_ai_01", final_text)
             st.session_state.show_buttons = should_show_buttons
         st.rerun()

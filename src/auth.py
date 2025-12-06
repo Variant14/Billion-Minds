@@ -1,11 +1,17 @@
 import streamlit as st
+import uuid
 import json
 import extra_streamlit_components as stx
 from pathlib import Path
+from datetime import datetime
+
 
 from src.qdrant import (
     load_users_from_qdrant,
-    save_user_to_qdrant
+    save_user_to_qdrant,
+    initialize_user_history,
+    get_user_history,
+    record_login
 )
 
 BASE_DIR = Path(__file__).parent.parent
@@ -40,6 +46,11 @@ def check_cookie_auth():
             st.session_state.current_user = current_user_cookie
             return True
     return False
+
+def get_current_user_cookie():
+    if cookie_manager.ready():
+        return cookie_manager.get("current_user")
+    return None
 
 def render_auth_ui():
     """Renders the login/register interface."""
