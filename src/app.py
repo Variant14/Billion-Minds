@@ -12,10 +12,10 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 # --- LOCAL MODULE IMPORTS ---
-from src.session_state import initialize_session_state
-from src.auth import load_users, check_cookie_auth, render_auth_ui
-from src.rag_pipeline import setup_rag_pipeline
-from src.utils import (
+from session_state import initialize_session_state
+from auth import load_users, check_cookie_auth, render_auth_ui
+from rag_pipeline import setup_rag_pipeline
+from utils import (
     reset_chat,
     handle_user_query,
     get_next_clarification,
@@ -29,7 +29,7 @@ from src.utils import (
 from langchain_core.messages import HumanMessage, AIMessage
 
 # --- Troubleshooting Imports ---
-from src.troublshoot import troubleshoot_node, diagnostics_node, log_collector_node
+from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node
 
 # =============================
 # INITIALIZATION
@@ -212,12 +212,12 @@ elif st.session_state.awaiting_resolution_confirmation:
                                 issues_message += f"{idx}. {issue_text}\n"
                             
                             # Add suggested commands if available
-                            if any('command' in issue or 'suggested_command' in issue for issue in issues):
+                            if any('command' in issue or 'suggested_commands' in issue for issue in issues):
                                 issues_message += "\n**Suggested Commands:**\n"
                                 st.markdown("\n**Suggested Commands:**")
                                 
                                 for idx, issue in enumerate(issues, 1):
-                                    command = issue.get('command') or issue.get('suggested_command')
+                                    command = issue.get('command') or issue.get('suggested_commands')
                                     if command:
                                         st.code(command, language="bash")
                                         issues_message += f"{idx}. `{command}`\n"

@@ -10,7 +10,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
 from rag_pipeline import combine_documents # Corrected from relative import
 import re
-# import paramiko
+import paramiko
 
 
 # NOTE: GEMINI_KEY will be passed from app.py to handle_user_query
@@ -413,18 +413,17 @@ def is_blacklisted(command: str) -> bool:
 
 
 def ssh_run(command):
-    # host = "192.168.56.102"
-    # username = "lahiru"
-    # password = "Lahiru123"
+    host = "192.168.56.103"
+    username = "lahiru"
+    password = "Lahiru123"
     
-    # ssh = paramiko.SSHClient()
-    # ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    # ssh.connect(host, username=username, password=password)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(host, username=username, password=password)
 
-    # stdin, stdout, stderr = ssh.exec_command(command)
-    # out = stdout.read().decode()
-    # err = stderr.read().decode()
-    # ssh.close()
+    stdin, stdout, stderr = ssh.exec_command(command)
+    out = stdout.read().decode()
+    err = stderr.read().decode()
+    ssh.close()
 
-    # return out if out else err
-    return f"Simulated execution of command: {command}"
+    return out if out else err

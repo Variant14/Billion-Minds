@@ -37,6 +37,8 @@ def log_collector_node(category):
             logs[cmd] = ssh_run(cmd)
         except:
             logs[cmd] = "ERROR executing command"
+
+    print(logs)
     return {"logs": logs}
 
 
