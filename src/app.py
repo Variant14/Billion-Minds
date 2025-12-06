@@ -104,6 +104,8 @@ def ensure_metadata_collection(name: str):
 ensure_metadata_collection("users")
 ensure_metadata_collection("tickets")
 ensure_metadata_collection("ticket_conversations")
+ensure_metadata_collection("knowledge_base")
+ensure_metadata_collection("knowledge_vectors")
 
 # =============================
 # USERS (persisted in Qdrant 'users' collection)
@@ -255,37 +257,67 @@ if not st.session_state.authenticated:
     st.stop()
 
 # =============================
-# BUILD KNOWLEDGE BASE (RAG)
+# EMBEDDING MODEL (HuggingFace MiniLM)
+# =============================
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"}
+)
+COL_VECTORS = "knowledge_vectors"  # for RAG
+
+
+# =============================
+# RAG pipeline using it_kb_vectors collection
 # =============================
 @st.cache_resource
 def setup_rag_pipeline():
+    """
+    Build retriever from it_kb_vectors collection.
+    If the vectors collection is empty, seed it with documents from src/it_docs and from existing KB summaries.
+    """
     DATA_PATH = BASE_DIR / "src/it_docs"
-    CHROMA_PATH = BASE_DIR / "src/chroma_db"
+    # 1) Seed vectors if collection is empty
+    try:
+        # check if any points exist in the vector collection
+        points, _ = qdrant.scroll(collection_name=COL_VECTORS, limit=1)
+        if not points:
+            # load docs from it_docs
+            if os.path.exists(DATA_PATH) and os.listdir(DATA_PATH):
+                loader = DirectoryLoader(str(DATA_PATH), glob="**/*.txt")
+                raw_docs = loader.load()
+                splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+                docs = splitter.split_documents(raw_docs)
+                texts = [d.page_content for d in docs]
+                vectors = embed_texts(texts)
+                points = []
+                for i, v in enumerate(vectors):
+                    payload = {"source": "it_docs", "text": texts[i]}
+                    points.append(rest.PointStruct(id=str(uuid.uuid4()), vector=v, payload=payload))
+                if points:
+                    qdrant.upsert(collection_name=COL_VECTORS, points=points)
+            # seed from existing knowledge_base summaries
+            kb_points, _ = qdrant.scroll(collection_name=COL_KNOWLEDGE, limit=2000)
+            seed = []
+            for p in kb_points:
+                payload = p.payload or {}
+                summary = payload.get("summary")
+                if summary:
+                    v = embed_text(summary)
+                    seed.append(rest.PointStruct(id=str(uuid.uuid4()), vector=v, payload={"source":"kb","kb_id": payload.get("id"), "summary": summary}))
+            if seed:
+                qdrant.upsert(collection_name=COL_VECTORS, points=seed)
+    except Exception as e:
+        st.warning(f"RAG seeding issue: {e}")
 
-    if not os.path.exists(DATA_PATH) or not os.listdir(DATA_PATH):
-        st.warning(f"No documents found in: {DATA_PATH}")
+    # Create a langchain Qdrant vectorstore wrapper for retrieval
+    try:
+        client_for_lc = qdrant  # QdrantClient instance
+        vector_store = qdrant(client=client_for_lc, collection_name=COL_VECTORS, embeddings=embedding_model)
+        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+        return retriever
+    except Exception as e:
+        st.error(f"Failed to create retriever: {e}")
         return None
-
-    loader = DirectoryLoader(str(DATA_PATH), glob="**/*.txt")
-    raw_docs = loader.load()
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-    docs = splitter.split_documents(raw_docs)
-
-    embedding_model = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"}
-    )
-
-    vector_store = Chroma.from_documents(
-        documents=docs,
-        embedding=embedding_model,
-        persist_directory=str(CHROMA_PATH)
-    )
-
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-    st.success(f"Knowledge Base Ready — {len(docs)} chunks loaded.")
-    return retriever
 
 retriever = setup_rag_pipeline()
 
@@ -797,6 +829,73 @@ def get_next_clarification():
     st.session_state.clarification_mode = False
     context_override = "User clarification answers:\n" + "\n".join(st.session_state.clarification_answers)
     return get_rag_answer("Final comprehensive diagnosis and solution", context_override=context_override)
+
+# =============================
+# KNOWLEDGE-BASE (payloads) & VECTOR STORE (it_kb_vectors)
+# =============================
+# KB payload structure will follow the JSON sample you provided.
+def kb_exists_by_keyword(keyword: str):
+    """Check whether KB already contains an entry with issue_pattern matching keyword."""
+    try:
+        points, _ = qdrant.scroll(
+            collection_name=COL_KNOWLEDGE,
+            scroll_filter=rest.Filter(
+                must=[rest.FieldCondition(key="issue_pattern", match=rest.MatchValue(value=keyword))]
+            ),
+            limit=1
+        )
+        return len(points) > 0
+    except Exception:
+        return False
+
+def kb_add_entry(ticket_id: str, keyword: str, summary: str, steps: list):
+    """Add a KB payload and also add it to vector collection for RAG retrieval."""
+    kb_id = f"KB-{uuid.uuid4().hex[:8].upper()}"
+    payload = {
+        "id": kb_id,
+        "title": f"Issue related to {keyword}",
+        "category": keyword,
+        "issue_pattern": keyword,
+        "summary": summary,
+        "resolution_steps": steps,
+        "last_resolution": {
+            "ticket_id": ticket_id,
+            "resolved_by_type": "agent",
+            "resolved_by_name": "AI Support Agent",
+            "resolved_by_id": "agent_ai_01",
+            "resolved_at": datetime.utcnow().isoformat()
+        },
+        "used_in_tickets": [ticket_id]
+    }
+    try:
+        # upsert into knowledge_base collection (payload + vector from summary)
+        vec = embed_text(summary)
+        point_id = str(uuid.uuid4())
+        qdrant.upsert(collection_name=COL_KNOWLEDGE, points=[rest.PointStruct(id=point_id, vector=vec, payload=payload)])
+        # also upsert into the main vector store for retrieval (it_kb_vectors)
+        qdrant.upsert(collection_name=COL_VECTORS, points=[rest.PointStruct(id=str(uuid.uuid4()), vector=vec, payload={"kb_id": kb_id, "summary": summary})])
+        return payload
+    except Exception as e:
+        st.error(f"Failed to add KB entry: {e}")
+        return None
+
+def kb_append_ticket(kb_id: str, ticket_id: str):
+    """Add ticket id to used_in_tickets for a KB entry (search by payload id)."""
+    try:
+        points, _ = qdrant.scroll(collection_name=COL_KNOWLEDGE, scroll_filter=rest.Filter(must=[rest.FieldCondition(key="id", match=rest.MatchValue(value=kb_id))]), limit=1)
+        if points:
+            payload = points[0].payload or {}
+            used = payload.get("used_in_tickets", [])
+            if ticket_id not in used:
+                used.append(ticket_id)
+                payload["used_in_tickets"] = used
+                payload["last_resolution"] = {"ticket_id": ticket_id, "resolved_by_type": "agent", "resolved_by_name": "AI Support Agent", "resolved_by_id": "agent_ai_01", "resolved_at": datetime.utcnow().isoformat()}
+                qdrant.upsert(collection_name=COL_KNOWLEDGE, points=[rest.PointStruct(id=points[0].id, vector=embed_text(payload.get("summary","")), payload=payload)])
+                return payload
+    except Exception as e:
+        st.warning(f"Could not append ticket to KB entry: {e}")
+    return None
+
 
 # =============================
 # CHATBOT UI
