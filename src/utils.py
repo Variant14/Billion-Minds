@@ -334,6 +334,7 @@ Respond with ONLY ONE WORD, choosing from:
 - "Hardware"
 - "Network"
 - "Performance"
+- "General"
 
 Your response:
 """
@@ -391,26 +392,31 @@ def create_conversation(payload):
     pass
 
 
-BLACKLIST_PATTERNS = [
-    r"\brm\b",
-    r"\bdd\b",
-    r"\bmkfs\b",
-    r"\bwipefs\b",
-    r"chmod\s+777",
-    r"kill\s+-9",
-    r">\s*/dev",
-    r"sudo\s+su",
-    r"mkpart",
-    r"fdisk"
-]
+# BLACKLIST_PATTERNS = [
+#     r"\brm\b",
+#     r"\bdd\b",
+#     r"\bmkfs\b",
+#     r"\bwipefs\b",
+#     r"chmod\s+777",
+#     r"kill\s+-9",
+#     r">\s*/dev",
+#     r"sudo\s+su",
+#     r"mkpart",
+#     r"fdisk"
+# ]
 
 
-def is_blacklisted(command: str) -> bool:
-    for pattern in BLACKLIST_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return True
-    return False
+# def is_blacklisted(command: str) -> bool:
+#     for pattern in BLACKLIST_PATTERNS:
+#         if re.search(pattern, command, re.IGNORECASE):
+#             return True
+#     return False
 
+
+import logging
+
+logging.basicConfig(filename=f"./actions.log", level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s")
 
 def ssh_run(command):
     host = "192.168.56.103"
@@ -425,5 +431,48 @@ def ssh_run(command):
     out = stdout.read().decode()
     err = stderr.read().decode()
     ssh.close()
+    if out:
+        logging.info(out)
+        return out
+    if err:
+        logging.error(err)
+        return err
 
-    return out if out else err
+
+def load_commands_whitelist():
+    try:
+        with open("allowed_rules.txt") as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+    except Exception as e:
+        print(f"Error loading whitelist: {e}")
+        return []
+
+ALLOWED_COMMANDS = load_commands_whitelist()
+print(ALLOWED_COMMANDS)
+
+import re
+from langchain.tools import tools
+
+@tools
+def is_allowed(cmd: str) -> bool:
+    """
+    Check if the command is allowed based on the whitelist patterns.
+    """
+    cmd = cmd.strip()
+    for pattern in ALLOWED_COMMANDS:
+        if re.fullmatch(pattern, cmd):
+            return True
+    return False
+
+
+import websockets
+import json
+
+async def execute_action(cmd: str):
+    url="ws://127.0.0.1:5001/ws?token=MyS3CR37C0D3"
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({"cmd":cmd}))
+
+        async for message in ws:
+            data = json.loads(message)
+            print(data)

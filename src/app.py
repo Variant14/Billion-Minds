@@ -29,7 +29,7 @@ from utils import (
 from langchain_core.messages import HumanMessage, AIMessage
 
 # --- Troubleshooting Imports ---
-from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node
+from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node, scanning_node
 
 # =============================
 # INITIALIZATION
@@ -188,15 +188,16 @@ elif st.session_state.awaiting_resolution_confirmation:
                 
                 with st.spinner("🔄 Processing your request..."):
                     with st.chat_message("AI"):
-                        ai_msg_auto = "Analyzing logs..."
-                        st.markdown(f"**{ai_msg_auto}**")
+                        ai_msg_auto = "**Analyzing logs...**"
+                        st.markdown(f"{ai_msg_auto}")
                         st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                         build_conversation_payload(ticketId, ai_msg_auto, False)
                     
                     # Collect logs
-                    logs = log_collector_node("general")["logs"]
-                    ai_msg_auto = "Logs collected. Running diagnostics..."
-                    st.markdown(f"**{ai_msg_auto}**")
+                    category = st.session_state.ticket.get("category", "General")
+                    logs = log_collector_node(category)["logs"]
+                    ai_msg_auto = "**Logs collected. Running diagnostics...**"
+                    st.markdown(f"{ai_msg_auto}")
                     st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                     build_conversation_payload(ticketId, ai_msg_auto, False)
                     
@@ -204,7 +205,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                     # Run diagnostics
                     ai_msg_auto = "**Running diagnostics...**\n\n"
                     st.markdown("**Running diagnostics...**")
-                    diagnostics_node_result = diagnostics_node(logs, st.session_state.chat_history)
+                    diagnostics_node_result = scanning_node(logs, st.session_state.chat_history)
                     
                     # Build AI message with issues and commands
                     if diagnostics_node_result and "detected_issues" in diagnostics_node_result:
@@ -212,7 +213,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                         
                         if issues:
                             # Display issues in UI
-                            ai_msg_auto += "Diagnostics completed. Issues detected:\n\n"
+                            ai_msg_auto += "**Diagnostics completed. Issues detected:**\n\n"
                             st.markdown("**Diagnostics completed. Issues detected:**")
                             
                             # Build formatted message for chat history
@@ -291,7 +292,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                 st.error(error_msg)
                 build_conversation_payload(ticketId, error_msg, False)
                 st.session_state.chat_history.append(AIMessage(error_msg))
-                st.session_state.show_buttons = True
+                st.session_state.awaiting_technician_confirmation = True
                 st.session_state.awaiting_resolution_confirmation = False
             finally:
                 st.session_state.processing = False

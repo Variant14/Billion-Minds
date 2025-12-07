@@ -1,5 +1,10 @@
-from utils import ssh_run 
+from utils import ssh_run, is_allowed
 from prompts import SAFE_COMMAND_GENERATION_PROMPT, FIX_COMPARE_PROMPT, ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT
+from langchain.tools import tool
+import logging
+
+logging.basicConfig(filename=f"./troubleshooting.log", level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s")
 
 LOG_COMMANDS = {
     "network": [
@@ -22,6 +27,11 @@ LOG_COMMANDS = {
         "journalctl -n 30"
     ]
 }
+
+@tool
+def log_collector(cmd: str) -> str:
+    """Runs a command on the target system to retrieve relevant logs and returns the output."""
+    return ssh_run(cmd)
 
 
 def log_collector_node(category):
@@ -54,7 +64,6 @@ llm = ChatGoogleGenerativeAI(
 
 # ------------- Diagnostics Node -------------
 def diagnostics_node(logs, context):
-
     prompt = SAFE_COMMAND_GENERATION_PROMPT.format(
         logs=json.dumps(logs, indent=2),
         context=context
@@ -80,6 +89,8 @@ def scanning_node(logs, context):
     )
 
     try:
+        tools = [is_allowed, log_collector]
+        llm.bind_tools(tools)
         response = llm.invoke(prompt).content
         if response is None:
             return {"detected_issues": []}
@@ -91,14 +102,14 @@ def scanning_node(logs, context):
         return {"detected_issues": []}
 
 # ------------- Troubleshooting Node -------------
-from utils import is_blacklisted, ssh_run
+from utils import is_allowed, ssh_run
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import AIMessage
 import json
 import streamlit as st
 from utils import build_conversation_payload
-import logging
+
 
 load_dotenv()
 
@@ -126,18 +137,14 @@ def troubleshoot_node(state):
         return {}
     
     try:
-        # 1. Extract suggested commands
-        logging.basicConfig(filename=f"./troubleshooting.log", level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s")
-
         for issue in issues:
             suggested_commands = issue.get("suggested_commands", None)
             if suggested_commands is None:
                 continue
             for cmd in issue["suggested_commands"]:
 
-                # Check blacklist regex first
-                if is_blacklisted(cmd):
+                # Check whitelisted regex first
+                if not is_allowed(cmd):
                     continue
 
                 safe_actions.append(cmd) 
@@ -157,7 +164,8 @@ def troubleshoot_node(state):
         # 3. Re-collect logs
         troubleshoot_ai_msg += f"\nRe-collecting logs...\n"
         st.markdown(f"Re-collecting logs...")
-        after_logs_state = log_collector_node("general")
+        
+        after_logs_state = log_collector_node(st.session_state.ticket.get("category", "General"))
         after_logs = after_logs_state["logs"]
 
         # 4. Compare logs
