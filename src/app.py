@@ -235,6 +235,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                                 build_conversation_payload(ticketId, ai_msg_auto, False)
                                 st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                                 # Call for human intervention
+                                st.session_state.awaiting_resolution_confirmation = False
                                 st.session_state.awaiting_technician_confirmation = True
                                 
                             
@@ -244,6 +245,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                                 build_conversation_payload(ticketId, ai_msg_auto, False)
                                 st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                                 # Call for human intervention
+                                st.session_state.awaiting_resolution_confirmation = False
                                 st.session_state.awaiting_technician_confirmation = True
                             else:
                                 # Execute troubleshooting node
@@ -259,26 +261,30 @@ elif st.session_state.awaiting_resolution_confirmation:
                                     st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                                     st.session_state.chat_history.append(AIMessage(troubleshoot_result["summary"]))
                                     build_conversation_payload(ticketId, troubleshoot_result["summary"], False)
+                                    st.session_state.awaiting_resolution_confirmation = False
+                                    st.session_state.show_buttons = True
                                 else:
                                     ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
                                     st.warning("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.")
                                     build_conversation_payload(ticketId, ai_msg_auto, False)
                                     st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                                     # Call for human intervention
+                                    st.session_state.awaiting_resolution_confirmation = False
                                     st.session_state.awaiting_technician_confirmation = True
                         else:
                             no_issues_msg = "✅ No issues detected. System appears to be functioning normally."
                             st.info(no_issues_msg)
                             build_conversation_payload(ticketId, no_issues_msg, False)
                             st.session_state.chat_history.append(AIMessage(no_issues_msg))
+                            st.session_state.awaiting_resolution_confirmation = False
+                            st.session_state.awaiting_technician_confirmation = True
                     else:
                         warning_msg = "⚠️ Diagnostics completed but no results were returned."
                         st.warning(warning_msg)
                         build_conversation_payload(ticketId, warning_msg, False)
                         st.session_state.chat_history.append(AIMessage(warning_msg))
-                
-                st.session_state.show_buttons = True
-                st.session_state.awaiting_resolution_confirmation = False
+                        st.session_state.awaiting_resolution_confirmation = False
+                        st.session_state.awaiting_technician_confirmation = True
                 
             except Exception as e:
                 error_msg = f"⚠️ An error occurred during diagnostics: {str(e)}"
