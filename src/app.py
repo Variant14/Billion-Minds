@@ -126,7 +126,7 @@ ensure_metadata_collection("ticket_conversations", dim=1)
 ensure_metadata_collection("knowledge_base", dim=384)
 ensure_metadata_collection("knowledge_vectors", dim=384)
 
-ensure_metadata_collection("user_history")
+ensure_metadata_collection("user_history",dim=1)
 
 
 
@@ -222,7 +222,7 @@ def initialize_user_history(user_id, name, tier):
     try:
         # Generate a UUID for the point id
         point_id = str(uuid.uuid4())
-        logger.info(f"initialize_user_history: creating history for {user_id} qid={point_id}")
+        #logger.info(f"initialize_user_history: creating history for {user_id} qid={point_id}")
         qdrant.upsert(
             collection_name="user_history",
             points=[rest.PointStruct(
@@ -231,7 +231,7 @@ def initialize_user_history(user_id, name, tier):
                 payload=history_payload
             )]
         )
-        logger.info(f"initialize_user_history: upsert complete for {user_id} qid={point_id}")
+        #logger.info(f"initialize_user_history: upsert complete for {user_id} qid={point_id}")
         try:
             st.sidebar.success(f"Initialized user history for {user_id}")
         except Exception:
@@ -248,17 +248,17 @@ def get_user_history(user_id):
     Retrieve user history from Qdrant.
     """
     try:
-        logger.info(f"get_user_history: fetching history for {user_id}")
+        #logger.info(f"get_user_history: fetching history for {user_id}")
         points, _ = qdrant.scroll(collection_name="user_history", limit=1000)
         for p in points:
             payload = p.payload or {}
             if payload.get("user_id") == user_id:
-                logger.info(f"get_user_history: found history for {user_id} (point id={p.id})")
+                #logger.info(f"get_user_history: found history for {user_id} (point id={p.id})")
                 return payload
         logger.info(f"get_user_history: no history found for {user_id}")
         return None
     except Exception as e:
-        logger.exception("Failed to retrieve user history")
+        #logger.exception("Failed to retrieve user history")
         st.error(f"Failed to retrieve user history: {e}")
         return None
 
@@ -268,7 +268,7 @@ def update_user_history(user_id, updates):
     Update user history with new data.
     """
     try:
-        logger.info(f"update_user_history: updating history for {user_id} with updates keys={list(updates.keys())}")
+     #   logger.info(f"update_user_history: updating history for {user_id} with updates keys={list(updates.keys())}")
         points, _ = qdrant.scroll(collection_name="user_history", limit=1000)
         for p in points:
             payload = p.payload or {}
@@ -288,13 +288,13 @@ def update_user_history(user_id, updates):
                         payload=payload
                     )]
                 )
-                logger.info(f"update_user_history: upsert complete for {user_id} (point id={p.id})")
+                #logger.info(f"update_user_history: upsert complete for {user_id} (point id={p.id})")
                 try:
                     st.sidebar.success(f"Updated user history for {user_id}")
                 except Exception:
                     pass
                 return payload
-        logger.info(f"update_user_history: no history point found to update for {user_id}")
+        #logger.info(f"update_user_history: no history point found to update for {user_id}")
         try:
             st.sidebar.info(f"No existing user_history entry found for {user_id}")
         except Exception:
@@ -833,7 +833,7 @@ def upsert_ticket_vector(ticket_id: str, text: str):
                 )
             ],
         )
-        logger.info(f"upsert_ticket_vector: stored vector for ticket {ticket_id}")
+        #logger.info(f"upsert_ticket_vector: stored vector for ticket {ticket_id}")
     except Exception as e:
         logger.exception("Failed to upsert ticket vector")
 
@@ -1023,7 +1023,7 @@ def create_ticket():
     }
 
     try:
-        logger.info(f"create_ticket: creating ticket {ticket_id} for user {current_user_email}")
+        #logger.info(f"create_ticket: creating ticket {ticket_id} for user {current_user_email}")
         qdrant.upsert(
             collection_name="tickets",
             points=[
@@ -1035,7 +1035,7 @@ def create_ticket():
             ]
         )
 
-        logger.info(f"create_ticket: upserted ticket {ticket_id}")
+        #logger.info(f"create_ticket: upserted ticket {ticket_id}")
         # initialize the conversation doc in ticket_conversations collection
         initialize_ticket_conversation(ticket_id)
 
@@ -1104,7 +1104,7 @@ def initialize_ticket_conversation(ticket_id):
         "events": []
     }
     try:
-        logger.info(f"initialize_ticket_conversation: initializing conversation for ticket {ticket_id}")
+        #logger.info(f"initialize_ticket_conversation: initializing conversation for ticket {ticket_id}")
         qdrant.upsert(
             collection_name="ticket_conversations",
             points=[rest.PointStruct(
@@ -1138,7 +1138,7 @@ def add_conversation_message(ticket_id, message_payload):
             payload = p.payload or {}
             if payload.get("ticket_id") == ticket_id:
                 payload.setdefault("conversation", []).append(message_payload)
-                logger.info(f"add_conversation_message: appending message to ticket {ticket_id}")
+                #logger.info(f"add_conversation_message: appending message to ticket {ticket_id}")
                 qdrant.upsert(
                     collection_name="ticket_conversations",
                     points=[rest.PointStruct(
@@ -1147,7 +1147,7 @@ def add_conversation_message(ticket_id, message_payload):
                         payload=payload
                     )]
                 )
-                logger.info(f"add_conversation_message: appended for ticket {ticket_id}")
+                #logger.info(f"add_conversation_message: appended for ticket {ticket_id}")
                 return payload
         # if not found, initialize and insert
         initialize_ticket_conversation(ticket_id)
@@ -1165,7 +1165,7 @@ def add_conversation_message(ticket_id, message_payload):
                 payload=payload
             )]
         )
-        logger.info(f"add_conversation_message: created new conversation doc for ticket {ticket_id}")
+        #logger.info(f"add_conversation_message: created new conversation doc for ticket {ticket_id}")
         return payload
     except Exception as e:
         logger.exception("Failed to append conversation message")
@@ -1186,7 +1186,7 @@ def add_ticket_event(ticket_id, event_type, actor_type, actor_id, message):
             payload = p.payload or {}
             if payload.get("ticket_id") == ticket_id:
                 payload.setdefault("events", []).append(event_payload)
-                logger.info(f"add_ticket_event: appending event {event_type} to ticket {ticket_id}")
+                #logger.info(f"add_ticket_event: appending event {event_type} to ticket {ticket_id}")
                 qdrant.upsert(
                     collection_name="ticket_conversations",
                     points=[rest.PointStruct(
@@ -1210,7 +1210,7 @@ def add_ticket_event(ticket_id, event_type, actor_type, actor_id, message):
                 payload=payload
             )]
         )
-        logger.info(f"add_ticket_event: created new conversation doc with event for ticket {ticket_id}")
+        #logger.info(f"add_ticket_event: created new conversation doc with event for ticket {ticket_id}")
         return payload
     except Exception as e:
         logger.exception("Failed to append ticket event")
