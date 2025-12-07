@@ -30,6 +30,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import Qdrant
 
 # --- Qdrant client for DB (users & tickets) ---
 from qdrant_client import QdrantClient
@@ -81,31 +82,43 @@ _METADATA_VECTOR_DIM = 1
 # QDRANT INITIALIZATION (users & tickets)
 # =============================
 try:
-    qdrant = QdrantClient(url=QDRANT_URL)
+    #qdrant = QdrantClient(url=QDRANT_URL)
+    qdrant = QdrantClient(
+        url=QDRANT_URL,
+        api_key=None,
+        prefer_grpc=False,   # <<<<<<<< MOST IMPORTANT LINE
+        timeout=60
+ )
 except Exception as e:
     st.error(f"Unable to connect to Qdrant at {QDRANT_URL}: {e}")
     st.stop()
 
 # Helper to create metadata collections using 1-d dummy vectors
-def ensure_metadata_collection(name: str):
+def ensure_metadata_collection(name: str, dim: int):
+    """Create collection with correct vector dimension (1 or 384)."""
     try:
         qdrant.get_collection(name)
     except Exception:
-        # create collection with 1-d vectors (we'll store payloads, vector set to [0.0])
         try:
             qdrant.recreate_collection(
                 collection_name=name,
-                vectors_config=rest.VectorParams(size=_METADATA_VECTOR_DIM, distance=rest.Distance.COSINE),
+                vectors_config=rest.VectorParams(
+                    size=dim,
+                    distance=rest.Distance.COSINE
+                )
             )
         except Exception as e:
             st.error(f"Could not create Qdrant collection '{name}': {e}")
             st.stop()
 
-ensure_metadata_collection("users")
-ensure_metadata_collection("tickets")
-ensure_metadata_collection("ticket_conversations")
-ensure_metadata_collection("knowledge_base")
-ensure_metadata_collection("knowledge_vectors")
+# 1-dimensional collections (no embeddings)
+ensure_metadata_collection("users", dim=1)
+ensure_metadata_collection("tickets", dim=1)
+ensure_metadata_collection("ticket_conversations", dim=1)
+
+# 384-dimensional collections (use embeddings)
+ensure_metadata_collection("knowledge_base", dim=384)
+ensure_metadata_collection("knowledge_vectors", dim=384)
 
 # =============================
 # USERS (persisted in Qdrant 'users' collection)
@@ -263,7 +276,22 @@ embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2",
     model_kwargs={"device": "cpu"}
 )
+
+
+# =============================
+# EMBEDDING HELPERS (REQUIRED)
+# =============================
+
+def embed_text(text: str):
+    """Embed a single text string."""
+    return embedding_model.embed_query(text)
+
+def embed_texts(text_list: list):
+    """Embed a list of text strings."""
+    return embedding_model.embed_documents(text_list)
+
 COL_VECTORS = "knowledge_vectors"  # for RAG
+COL_KNOWLEDGE = "knowledge_base"
 
 
 # =============================
@@ -274,6 +302,7 @@ def setup_rag_pipeline():
     """
     Build retriever from it_kb_vectors collection.
     If the vectors collection is empty, seed it with documents from src/it_docs and from existing KB summaries.
+    Returns None if setup fails - fallback methods will be used instead.
     """
     DATA_PATH = BASE_DIR / "src/it_docs"
     # 1) Seed vectors if collection is empty
@@ -310,13 +339,17 @@ def setup_rag_pipeline():
         st.warning(f"RAG seeding issue: {e}")
 
     # Create a langchain Qdrant vectorstore wrapper for retrieval
+    # If this fails, return None - the app will use manual_vector_search instead
     try:
-        client_for_lc = qdrant  # QdrantClient instance
-        vector_store = qdrant(client=client_for_lc, collection_name=COL_VECTORS, embeddings=embedding_model)
+        vector_store = Qdrant(
+            client=qdrant,
+            collection_name=COL_VECTORS,
+            embeddings=embedding_model
+        )
         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
         return retriever
     except Exception as e:
-        st.error(f"Failed to create retriever: {e}")
+        st.info(f"LangChain retriever unavailable, using direct Qdrant search: {e}")
         return None
 
 retriever = setup_rag_pipeline()
@@ -622,6 +655,62 @@ def add_ticket_event(ticket_id, event_type, actor_type, actor_id, message):
 def combine_documents(docs):
     return "\n\n".join(d.page_content for p in docs for d in ([p] if hasattr(p, "page_content") else [])) if docs else ""
 
+def manual_vector_search(query: str, k: int = 3):
+    """Fallback manual vector search using Qdrant client directly"""
+    try:
+        query_vector = embed_text(query)
+        search_results = None
+        
+        # Try multiple methods for compatibility across Qdrant versions
+        try:
+            # Method 1: Newer API (Qdrant 1.7+)
+            search_results = qdrant.query_points(
+                collection_name=COL_VECTORS,
+                query=query_vector,
+                limit=k
+            ).points
+        except AttributeError:
+            try:
+                # Method 2: Alternative method
+                from qdrant_client.models import SearchRequest
+                search_results = qdrant.search_points(
+                    collection_name=COL_VECTORS,
+                    query_vector=query_vector,
+                    limit=k
+                )
+            except (AttributeError, ImportError):
+                try:
+                    # Method 3: Older API (pre-1.7)
+                    search_results = qdrant.search(
+                        collection_name=COL_VECTORS,
+                        query_vector=query_vector,
+                        limit=k
+                    )
+                except AttributeError:
+                    # Method 4: Last resort - use scroll without search
+                    st.warning("Vector search not available, using fallback")
+                    return []
+        
+        if not search_results:
+            return []
+        
+        # Create mock document objects compatible with combine_documents
+        class MockDoc:
+            def __init__(self, content):
+                self.page_content = content
+        
+        docs = []
+        for result in search_results:
+            payload = result.payload or {}
+            content = payload.get("text") or payload.get("summary", "")
+            if content:
+                docs.append(MockDoc(content))
+        return docs
+        
+    except Exception as e:
+        st.warning(f"Manual search failed: {e}")
+        return []
+
 def reset_chat():
     """Reset chat to start a new conversation"""
     st.session_state.chat_history = []
@@ -692,8 +781,20 @@ Do NOT provide a solution.
     return questions[:5]
 
 def get_rag_answer(user_query, context_override=None, is_technical=True):
-    # Use vectorstore similarity search directly if available
-    context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
+    # Try using retriever, fallback to manual search
+    context_docs = []
+    
+    if retriever:
+        try:
+            context_docs = retriever.invoke(user_query)
+        except AttributeError:
+            context_docs = manual_vector_search(user_query, k=3)
+        except Exception as e:
+            st.warning(f"Retriever error, using manual search")
+            context_docs = manual_vector_search(user_query, k=3)
+    else:
+        context_docs = manual_vector_search(user_query, k=3)
+    
     context_text = combine_documents(context_docs) if context_docs else ""
     if context_override:
         context_text += "\n\n" + context_override
@@ -782,7 +883,16 @@ def handle_user_query(user_query):
         return get_rag_answer(user_query, is_technical=False), False
 
     # Knowledge base search (will replace later with new KB collection)
-    context_docs = retriever.vectorstore.similarity_search(user_query, k=3) if retriever else []
+    #context_docs = retriever.invoke(user_query) if retriever else []
+    #context_text = combine_documents(context_docs) if context_docs else ""
+    try:
+        if retriever:
+            context_docs = retriever.invoke(user_query)
+        else:
+            context_docs = manual_vector_search(user_query, k=3)
+    except (AttributeError, Exception):
+        context_docs = manual_vector_search(user_query, k=3)
+    
     context_text = combine_documents(context_docs) if context_docs else ""
 
     # Trigger clarifications
@@ -834,17 +944,20 @@ def get_next_clarification():
 # KNOWLEDGE-BASE (payloads) & VECTOR STORE (it_kb_vectors)
 # =============================
 # KB payload structure will follow the JSON sample you provided.
+# =============================
+# KNOWLEDGE-BASE HELPER FUNCTIONS
+# =============================
 def kb_exists_by_keyword(keyword: str):
     """Check whether KB already contains an entry with issue_pattern matching keyword."""
     try:
-        points, _ = qdrant.scroll(
-            collection_name=COL_KNOWLEDGE,
-            scroll_filter=rest.Filter(
-                must=[rest.FieldCondition(key="issue_pattern", match=rest.MatchValue(value=keyword))]
-            ),
-            limit=1
-        )
-        return len(points) > 0
+        keyword_lower = keyword.lower().strip()
+        points, _ = qdrant.scroll(collection_name=COL_KNOWLEDGE, limit=1000)
+        for point in points:
+            payload = point.payload or {}
+            existing_keyword = payload.get("issue_pattern", "").lower().strip()
+            if existing_keyword == keyword_lower:
+                return True
+        return False
     except Exception:
         return False
 
@@ -873,29 +986,217 @@ def kb_add_entry(ticket_id: str, keyword: str, summary: str, steps: list):
         point_id = str(uuid.uuid4())
         qdrant.upsert(collection_name=COL_KNOWLEDGE, points=[rest.PointStruct(id=point_id, vector=vec, payload=payload)])
         # also upsert into the main vector store for retrieval (it_kb_vectors)
-        qdrant.upsert(collection_name=COL_VECTORS, points=[rest.PointStruct(id=str(uuid.uuid4()), vector=vec, payload={"kb_id": kb_id, "summary": summary})])
+        qdrant.upsert(collection_name=COL_VECTORS, points=[rest.PointStruct(id=str(uuid.uuid4()), vector=vec, payload={"kb_id": kb_id, "summary": summary, "source": "kb"})])
         return payload
     except Exception as e:
         st.error(f"Failed to add KB entry: {e}")
         return None
 
-def kb_append_ticket(kb_id: str, ticket_id: str):
-    """Add ticket id to used_in_tickets for a KB entry (search by payload id)."""
+# =============================
+# KNOWLEDGE BASE EXTRACTION & MANAGEMENT
+# =============================
+
+def extract_technical_keywords(conversation_history):
+    """
+    Extract technical keywords from the first user message and AI response.
+    Returns a list of potential keywords.
+    """
+    if len(conversation_history) < 2:
+        return []
+    
+    # Get first user message and first AI response
+    first_user_msg = ""
+    first_ai_msg = ""
+    
+    for msg in conversation_history[:4]:  # Check first 4 messages to ensure we get both
+        if isinstance(msg, HumanMessage) and not first_user_msg:
+            first_user_msg = msg.content
+        elif isinstance(msg, AIMessage) and first_user_msg and not first_ai_msg:
+            first_ai_msg = msg.content
+    
+    if not first_user_msg:
+        return []
+    
+    # Combine both messages for context
+    combined_text = f"{first_user_msg}\n{first_ai_msg}"
+    
+    template = """
+You are a technical keyword extractor for an IT support knowledge base.
+
+Extract 1-3 technical keywords or key phrases from this conversation that represent the main issue.
+Focus on:
+- Specific technical problems (e.g., "VPN connection", "Outlook sync", "BSOD")
+- Software/hardware names (e.g., "Docker", "Windows Update", "Exchange")
+- Error types (e.g., "authentication failure", "slow boot")
+
+Conversation:
+{conversation}
+
+Return ONLY a JSON array of keywords, nothing else:
+["keyword1", "keyword2", "keyword3"]
+
+If no technical keywords found, return: []
+"""
+    
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, api_key=GEMINI_KEY)
+    chain = prompt | llm | StrOutputParser()
+    
     try:
-        points, _ = qdrant.scroll(collection_name=COL_KNOWLEDGE, scroll_filter=rest.Filter(must=[rest.FieldCondition(key="id", match=rest.MatchValue(value=kb_id))]), limit=1)
+        response = chain.invoke({"conversation": combined_text}).strip()
+        # Extract JSON array
+        json_match = re.search(r'\[.*?\]', response, re.DOTALL)
+        if json_match:
+            keywords = json.loads(json_match.group(0))
+            # Clean and validate keywords
+            return [k.strip().lower() for k in keywords if k and len(k.strip()) > 2]
+        return []
+    except Exception as e:
+        st.warning(f"Keyword extraction failed: {e}")
+        return []
+
+
+def generate_kb_summary_and_steps(conversation_history, keyword):
+    """
+    Generate a summary and resolution steps from the conversation.
+    """
+    # Get full conversation text
+    conv_text = "\n".join([
+        f"{'User' if isinstance(msg, HumanMessage) else 'Agent'}: {msg.content}"
+        for msg in conversation_history
+    ])
+    
+    template = """
+You are creating a knowledge base entry for IT support.
+
+Keyword/Issue: {keyword}
+
+Conversation:
+{conversation}
+
+Create a knowledge base entry with:
+1. A brief summary (2-3 sentences) of the issue and solution
+2. Step-by-step resolution steps (3-7 steps)
+
+Respond in STRICT JSON format:
+{{
+    "summary": "Brief summary here",
+    "resolution_steps": [
+        "Step 1: ...",
+        "Step 2: ...",
+        "Step 3: ..."
+    ]
+}}
+"""
+    
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, api_key=GEMINI_KEY)
+    chain = prompt | llm | StrOutputParser()
+    
+    try:
+        response = chain.invoke({"keyword": keyword, "conversation": conv_text}).strip()
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            return {
+                "summary": data.get("summary", f"Resolution for {keyword}"),
+                "steps": data.get("resolution_steps", [])
+            }
+        return None
+    except Exception as e:
+        st.warning(f"KB generation failed: {e}")
+        return None
+
+
+def process_resolved_ticket_for_kb(ticket_id):
+    """
+    Process a resolved ticket and add to knowledge base if applicable.
+    This is called when user confirms resolution.
+    """
+    try:
+        # Get conversation history
+        if not st.session_state.chat_history or len(st.session_state.chat_history) < 2:
+            return  # Not enough conversation to extract KB
+        st.write(f"DEBUG: Processing ticket {ticket_id}")
+        st.write(f"DEBUG: Chat history length: {len(st.session_state.chat_history)}")
+        # Extract keywords
+        keywords = extract_technical_keywords(st.session_state.chat_history)
+        st.write(f"DEBUG: Extracted keywords: {keywords}")
+
+        if not keywords:
+            st.info("No technical keywords found for knowledge base entry.")
+            return
+        
+        # Check each keyword
+        for keyword in keywords:
+            # Check if keyword already exists in KB
+            if kb_exists_by_keyword(keyword):
+                # Keyword exists, just append ticket ID
+                kb_append_ticket_by_keyword(keyword, ticket_id)
+                st.success(f"✅ Linked ticket to existing KB entry: '{keyword}'")
+            else:
+                # Keyword doesn't exist, create new KB entry
+                kb_data = generate_kb_summary_and_steps(st.session_state.chat_history, keyword)
+                
+                if kb_data:
+                    result = kb_add_entry(
+                        ticket_id=ticket_id,
+                        keyword=keyword,
+                        summary=kb_data["summary"],
+                        steps=kb_data["steps"]
+                    )
+                    
+                    if result:
+                        st.success(f"✅ New KB entry created: '{keyword}'")
+                    else:
+                        st.warning(f"⚠️ Failed to create KB entry for '{keyword}'")
+                else:
+                    st.warning(f"⚠️ Could not generate KB content for '{keyword}'")
+        
+    except Exception as e:
+        st.error(f"Error processing KB: {e}")
+
+
+def kb_append_ticket_by_keyword(keyword: str, ticket_id: str):
+    """
+    Find KB entry by keyword and append ticket ID to it.
+    """
+    try:
+        points, _ = qdrant.scroll(
+            collection_name=COL_KNOWLEDGE,
+            scroll_filter=rest.Filter(
+                must=[rest.FieldCondition(key="issue_pattern", match=rest.MatchValue(value=keyword))]
+            ),
+            limit=1
+        )
+        
         if points:
             payload = points[0].payload or {}
             used = payload.get("used_in_tickets", [])
+            
             if ticket_id not in used:
                 used.append(ticket_id)
                 payload["used_in_tickets"] = used
-                payload["last_resolution"] = {"ticket_id": ticket_id, "resolved_by_type": "agent", "resolved_by_name": "AI Support Agent", "resolved_by_id": "agent_ai_01", "resolved_at": datetime.utcnow().isoformat()}
-                qdrant.upsert(collection_name=COL_KNOWLEDGE, points=[rest.PointStruct(id=points[0].id, vector=embed_text(payload.get("summary","")), payload=payload)])
+                payload["last_resolution"] = {
+                    "ticket_id": ticket_id,
+                    "resolved_by_type": "agent",
+                    "resolved_by_name": "AI Support Agent",
+                    "resolved_by_id": "agent_ai_01",
+                    "resolved_at": datetime.utcnow().isoformat()
+                }
+                
+                qdrant.upsert(
+                    collection_name=COL_KNOWLEDGE,
+                    points=[rest.PointStruct(
+                        id=points[0].id,
+                        vector=embed_text(payload.get("summary", "")),
+                        payload=payload
+                    )]
+                )
                 return payload
     except Exception as e:
         st.warning(f"Could not append ticket to KB entry: {e}")
     return None
-
 
 # =============================
 # CHATBOT UI
@@ -934,18 +1235,39 @@ for msg in st.session_state.chat_history:
 
 # --- Clarification mode ---
 if st.session_state.clarification_mode:
-    next_q = st.session_state.clarification_questions[st.session_state.clarification_index]
+
+    questions = st.session_state.clarification_questions
+    idx = st.session_state.clarification_index
+
+    # ---- SAFETY CHECKS ----
+    # 1) No questions generated → exit clarification mode
+    if not questions:
+        st.session_state.clarification_mode = False
+        st.session_state.clarification_index = 0
+        with st.chat_message("AI"):
+            st.markdown("I'm sorry, I couldn't generate clarification questions. Let me try to help directly.")
+        st.rerun()
+
+    # 2) Index out of range → move to final diagnosis
+    if idx >= len(questions):
+        st.session_state.clarification_mode = False
+        context_override = "User clarification answers:\n" + "\n".join(st.session_state.clarification_answers)
+        ai_stream = get_rag_answer("Final comprehensive diagnosis and solution", context_override=context_override)
+        final = st.write_stream(ai_stream)
+        st.session_state.chat_history.append(AIMessage(final))
+        st.session_state.show_buttons = True
+        st.rerun()
+
+    # ---- SHOW NEXT QUESTION ----
+    next_q = questions[idx]
     with st.chat_message("AI"):
         st.markdown(next_q)
+
     ans = st.chat_input("Answer the clarification question:")
     if ans:
         st.session_state.chat_history.append(HumanMessage(ans))
         st.session_state.clarification_answers.append(ans)
-        with st.chat_message("AI"):
-            ai_stream = get_next_clarification()
-            final = st.write_stream(ai_stream)
-            st.session_state.chat_history.append(AIMessage(final))
-            st.session_state.show_buttons = True
+        st.session_state.clarification_index += 1
         st.rerun()
 
 # --- Resolution buttons ---
@@ -962,6 +1284,11 @@ elif st.session_state.show_buttons:
             if ticket_id:
                 update_ticket_status(ticket_id, "resolved")
                 add_ticket_event(ticket_id, "resolved", "agent", "agent_ai_01", "Ticket resolved by agent/AI.")
+                
+                # Process ticket for knowledge base
+                with st.spinner("Processing knowledge base..."):
+                    process_resolved_ticket_for_kb(ticket_id)
+                
             st.session_state.chat_history.append(HumanMessage("Yes"))
             st.session_state.chat_history.append(AIMessage("🎉 Glad your issue is resolved! Feel free to ask if you have any other questions."))
             st.session_state.chat_history.append(AIMessage("Resetting the chat to start a new conversation!"))
