@@ -239,7 +239,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                                 st.session_state.awaiting_technician_confirmation = True
                                 
                             
-                            elif any(issue.get("status") == "human_intervention_needed" and idx < len(issues) - idx for idx, issue in enumerate(issues)):
+                            elif any(issue.get("human_intervention_needed", False) and idx < len(issues) - idx for idx, issue in enumerate(issues)):
                                 ai_msg_auto += "\n_⚠️ Some critical issues require human intervention. Please consider escalating to a technician._\n"
                                 st.warning("⚠️ Some critical issues require human intervention. Please consider escalating to a technician.")
                                 build_conversation_payload(ticketId, ai_msg_auto, False)
