@@ -127,7 +127,7 @@ def troubleshoot_node(state):
     
     try:
         # 1. Extract suggested commands
-        logging.basicConfig(filename=f"./logs/{ticketId}-troubleshooting.log", level=logging.INFO,
+        logging.basicConfig(filename=f"./troubleshooting.log", level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s")
 
         for issue in issues:
@@ -148,7 +148,7 @@ def troubleshoot_node(state):
         st.info(f"Executing troubleshooting actions...")
         for cmd in safe_actions:
             result = ssh_run(cmd)
-            logging.info(f"Executed command: {cmd}")
+            logging.info(f"{ticketId}: Executed command: {cmd}")
             executed_results.append({
                 "command": cmd,
                 "output": result
