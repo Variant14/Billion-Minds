@@ -5,6 +5,8 @@ os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 os.environ["STREAMLIT_SERVER_FILE_WATCHER"] = "none"
 
 import streamlit as st
+import smtplib
+
 
 # MUST BE FIRST - Set page config before any other Streamlit commands
 st.set_page_config(page_title="IT Support Bot", page_icon="💻")
@@ -31,6 +33,8 @@ from langchain_community.document_loaders import DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.vectorstores import Qdrant
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import logging
 
@@ -116,6 +120,10 @@ def ensure_metadata_collection(name: str, dim: int):
         except Exception as e:
             st.error(f"Could not create Qdrant collection '{name}': {e}")
             st.stop()
+
+qdrant.delete_collection("knowledge_vectors")
+qdrant.delete_collection("knowledge_base")
+
 
 # 1-dimensional collections (no embeddings)
 ensure_metadata_collection("users", dim=1)
@@ -1784,6 +1792,66 @@ def kb_append_ticket_by_keyword(keyword: str, ticket_id: str):
     return None
 
 # =============================
+# Email Integration
+# =============================
+
+
+def send_ticket_escalation_email(ticket_id, user_email, conversation):
+    """
+    Sends escalation email to IT team using company domain email.
+    """
+    try:
+        sender_email = "shakishnavi.murugan@1billiontech.com"   # REQUIRED company domain
+        receiver_email = "shakishnavi.murugan@1billiontech.com" # Your IT team's inbox
+        subject = f"[ESCALATED] Ticket #{ticket_id} requires human intervention"
+
+        # Convert conversation (list) to formatted text
+        conv_text = "\n".join([f"- {msg}" for msg in conversation])
+
+        body = f"""
+A ticket has been escalated for manual review.
+
+TICKET DETAILS
+--------------
+Ticket ID: {ticket_id}
+User Email: {user_email}
+
+CONVERSATION HISTORY
+--------------------
+{conv_text}
+
+Please assign a technician and respond to the user accordingly.
+
+-- Automated IT Support System (1BillionTech)
+"""
+
+        # Compose email
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = receiver_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        # SMTP server (example: Office365 / custom domain)
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", 587))
+        smtp_user = os.getenv("SMTP_EMAIL")  # admin login
+        smtp_pass = os.getenv("SMTP_PASSWORD")
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+
+        return True
+
+    except Exception as e:
+        st.error(f"Failed to send escalation email: {e}")
+        return False
+
+
+
+# =============================
 # CHATBOT UI
 # =============================
 st.title("IT Support Chat-Bot")
@@ -1973,6 +2041,26 @@ elif st.session_state.awaiting_technician_confirmation:
                 update_ticket_status(ticket_id, "escalated")
                 add_ticket_event(ticket_id, "assigned", "system", "system", "Assigned to human technician")
             ticket_record = {"ticket_id": ticket_id}
+            # Prepare conversation text
+            conversation_text = [msg.content for msg in st.session_state.chat_history]
+            user_email = st.session_state.current_user
+
+            # Send escalation email
+            email_sent = send_ticket_escalation_email(
+                ticket_id=ticket_id,
+                user_email=user_email,
+                conversation=conversation_text
+            )
+
+            if email_sent:
+                st.session_state.chat_history.append(
+                    AIMessage(f"📩 Your issue has been escalated to our technical team via email.\nA technician will contact you soon.\n\nTicket ID: #{ticket_id}")
+                )
+            else:
+                st.session_state.chat_history.append(
+                    AIMessage("⚠️ Escalation attempted, but email could not be sent. IT team may not receive the notification.")
+                )
+
             st.session_state.chat_history.append(AIMessage(f"✅ Your issue has been escalated to our technical team. A technician will contact you shortly. Ticket ID: #{ticket_id}"))
             st.session_state.technician_assign = True
             st.session_state.awaiting_technician_confirmation = False
