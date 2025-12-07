@@ -1949,7 +1949,7 @@ if st.session_state.clarification_mode:
         st.session_state.chat_history.append(HumanMessage(ans))
         st.session_state.clarification_answers.append(ans)
         st.session_state.clarification_index += 1
-            st.session_state.show_buttons = True
+        st.session_state.show_buttons = True
         st.rerun()
 
 #Ask if the provided resolution steps worked
