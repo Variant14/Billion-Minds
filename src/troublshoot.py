@@ -13,9 +13,6 @@ llm = ChatGoogleGenerativeAI(
     temperature=0.4
     )
 
-logging.basicConfig(filename=f"./log_analysis.log", level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s")
-
 # LOG_COMMANDS = {
 #     "network": [
 #         "ping -c 3 8.8.8.8",
@@ -59,12 +56,17 @@ def log_commands_generator_node(category):
 
 def log_collector_node(category):
     """Collects logs from the target system based on the specified category."""
-    selected_commands =  st.session_state.get("log_commands", log_commands_generator_node(category))
+    selected_commands =  st.session_state.get("log_commands")
 
     if not selected_commands or len(selected_commands) == 0:
-        return {"logs": {}}
+        selected_commands = log_commands_generator_node(category)
+        st.session_state.log_commands = selected_commands
 
+    logging.basicConfig(filename=f"./log_analysis.log", level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s")
     logs = {}
+    print("selected commands:\n\n")
+    print(selected_commands)
     
     for cmd in selected_commands:
         print(f"Executing command: {cmd.command}")
@@ -73,6 +75,8 @@ def log_collector_node(category):
                 print(f"Command {cmd.command} is not allowed")
                 continue
             st.markdown(f"{cmd.message}")
+            st.session_state.chat_history.append(AIMessage(cmd.message))
+            build_conversation_payload(st.session_state.ticketId, cmd.message, False)
             logs[cmd.command] = ssh_run(cmd.command)
             logging.info(f"Executed command: {cmd.command}")
         except Exception as e:

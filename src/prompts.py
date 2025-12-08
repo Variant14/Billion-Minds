@@ -132,14 +132,18 @@ COMMAND QUALITY RULES:
 - Prefer commonly available tools (journalctl, dmesg, ps, top, free, df, ss, netstat).
 - Commands must align with the provided issue_category.
 
-OUTPUT FORMAT (STRICT — JSON ONLY):
-Return a JSON array of objects. Do NOT include explanations outside JSON.
+Return ONLY raw JSON.
+Do not use markdown.
+Do not wrap in ```json.
+Do not include explanations.
+Output must be directly parseable by json.loads().
+
 
 Each object must follow this schema:
 {{
   "command": "<exact command>",
-  "purpose": "<what diagnostic information this command collects>",
-  "message": "<informative message for the user>",
+  "reason": "<what diagnostic information this command collects, MAX 20 words>",
+  "message": "<informative message for the user, MAX 15 words>",
   "safety_level": "safe-read-only"
 }}
 
@@ -152,7 +156,7 @@ ADDITIONAL RULES:
 Your goal is to safely collect only the logs and system evidence needed to enable accurate root cause analysis of the CURRENT issue.
 
 context: {context}
-issue_category: {issue_category}
+Issue Category: {issue_category}
 
 Return ONLY the JSON array.
 
