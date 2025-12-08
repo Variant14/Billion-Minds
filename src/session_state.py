@@ -21,7 +21,8 @@ DEFAULTS = {
     "show_reset_countdown": False,
     "ticket_created":False,
     "ticket":[],
-    "ticketId": "Test"
+    "ticketId": "Test",
+    "log_commands":[]
 }
 
 def initialize_session_state():

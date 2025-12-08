@@ -819,34 +819,34 @@ Respond in STRICT JSON ONLY:
     
 
 
-def upsert_ticket_vector(ticket_id: str, text: str):
-    """
-    Store or update a semantic vector for a ticket in Qdrant.
-    `text` should summarize the ticket (title + description, etc.).
-    """
-    try:
-        emb_model = get_ticket_embedding_model()
-        vector = emb_model.embed_query(text)
+# def upsert_ticket_vector(ticket_id: str, text: str):
+#     """
+#     Store or update a semantic vector for a ticket in Qdrant.
+#     `text` should summarize the ticket (title + description, etc.).
+#     """
+#     try:
+#         emb_model = get_ticket_embedding_model()
+#         vector = emb_model.embed_query(text)
 
-        qdrant.upsert(
-            collection_name="ticket_vectors",
-            points=[
-                rest.PointStruct(
-                    id=ticket_id,
-                    vector=vector,
-                    payload={
-                        "ticket_id": ticket_id,
-                        "text": text,
-                    },
-                )
-            ],
-        )
-        #logger.info(f"upsert_ticket_vector: stored vector for ticket {ticket_id}")
-    except Exception as e:
-        logger.exception("Failed to upsert ticket vector")
+#         qdrant.upsert(
+#             collection_name="ticket_vectors",
+#             points=[
+#                 rest.PointStruct(
+#                     id=ticket_id,
+#                     vector=vector,
+#                     payload={
+#                         "ticket_id": ticket_id,
+#                         "text": text,
+#                     },
+#                 )
+#             ],
+#         )
+#         #logger.info(f"upsert_ticket_vector: stored vector for ticket {ticket_id}")
+#     except Exception as e:
+#         logger.exception("Failed to upsert ticket vector")
 
 
-def search_similar_tickets(query: str, top_k: int = 3, score_threshold: float = 0.8):
+# def search_similar_tickets(query: str, top_k: int = 3, score_threshold: float = 0.8):
     """
     Semantic search over past tickets by user query.
     Returns a list of Qdrant ScoredPoint objects.
@@ -867,7 +867,7 @@ def search_similar_tickets(query: str, top_k: int = 3, score_threshold: float = 
         logger.exception("Ticket vector search failed")
         return []
 
-def get_title_description_with_ticket_match(issue_context: str):
+# def get_title_description_with_ticket_match(issue_context: str):
     """
     Like get_title_description, but also:
     - Checks for a similar past ticket via vector search.
@@ -2035,15 +2035,16 @@ elif st.session_state.awaiting_resolution_confirmation:
                 
                 with st.spinner("🔄 Processing your request..."):
                     with st.chat_message("AI"):
-                        ai_msg_auto = "Analyzing logs..."
-                        st.markdown(f"**{ai_msg_auto}**")
+                        ai_msg_auto = "**Analyzing logs...**"
+                        st.markdown(f"{ai_msg_auto}")
                         st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                         build_conversation_payload(ticketId, ai_msg_auto, False)
                     
                     # Collect logs
-                    logs = log_collector_node("general")["logs"]
-                    ai_msg_auto = "Logs collected. Running diagnostics..."
-                    st.markdown(f"**{ai_msg_auto}**")
+                    category = st.session_state.ticket.get("category", "General")
+                    logs = log_collector_node(category)["logs"]
+                    ai_msg_auto = "**Logs collected. Running diagnostics...**"
+                    st.markdown(f"{ai_msg_auto}")
                     st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                     build_conversation_payload(ticketId, ai_msg_auto, False)
                     
@@ -2059,7 +2060,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                         
                         if issues:
                             # Display issues in UI
-                            ai_msg_auto += "Diagnostics completed. Issues detected:\n\n"
+                            ai_msg_auto += "**Diagnostics completed. Issues detected:**\n\n"
                             st.markdown("**Diagnostics completed. Issues detected:**")
                             
                             # Build formatted message for chat history
@@ -2138,7 +2139,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                 st.error(error_msg)
                 build_conversation_payload(ticketId, error_msg, False)
                 st.session_state.chat_history.append(AIMessage(error_msg))
-                st.session_state.show_buttons = True
+                st.session_state.awaiting_technician_confirmation = True
                 st.session_state.awaiting_resolution_confirmation = False
             finally:
                 st.session_state.processing = False
