@@ -150,6 +150,12 @@ ADDITIONAL RULES:
 - Prefer fewer high-impact commands over many generic ones.
 
 Your goal is to safely collect only the logs and system evidence needed to enable accurate root cause analysis of the CURRENT issue.
+
+context: {context}
+issue_category: {issue_category}
+
+Return ONLY the JSON array.
+
 """
 
 SAFE_COMMAND_GENERATION_PROMPT = """

@@ -39,7 +39,10 @@ logging.basicConfig(filename=f"./log_analysis.log", level=logging.INFO,
 # }
 
 def log_commands_generator_node(category):
-    prompt = LOG_COMMAND_GENERATION_PROMPT.format(category=category)
+    prompt = LOG_COMMAND_GENERATION_PROMPT.format(
+        context=st.session_state.get("chat_history", []),
+        issue_category=category
+        )
 
     try:
         response = llm.invoke(prompt).content
