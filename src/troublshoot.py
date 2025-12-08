@@ -55,16 +55,18 @@ def log_commands_generator_node(category):
         return []
     
 
+import logging
+logger = logging.getLogger("log_calls")
+
 def log_collector_node(category):
     """Collects logs from the target system based on the specified category."""
     selected_commands =  st.session_state.get("log_commands")
+    ticketId = st.session_state.get("current_ticket_id")
 
     if not selected_commands or len(selected_commands) == 0:
         selected_commands = log_commands_generator_node(category)
         st.session_state.log_commands = selected_commands
 
-    logging.basicConfig(filename=f"./log_analysis.log", level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s")
     logs = {}
     print("selected commands:\n\n")
     print(selected_commands)
@@ -79,10 +81,10 @@ def log_collector_node(category):
             st.session_state.chat_history.append(AIMessage(cmd.get("message")))
             build_conversation_payload(st.session_state.current_ticket_id, cmd.get("message"), False)
             logs[cmd.get('command')] = ssh_run(cmd.get('command'))
-            logging.info(f"Executed command: {cmd.get('command')}")
+            logger.info(f"{ticketId} Executed command: {cmd.get('command')}")
         except Exception as e:
             print(f"Error executing command {cmd.get('command')}: {e}")
-            logging.error(f"Error executing command {cmd.get('command')}: {e}")
+            logger.error(f"{ticketId} Error executing command {cmd.get('command')}: {e}")
             logs[cmd.get('command')] = f"ERROR executing command {cmd.get('command')}: {e}"
     return {"logs": logs}
     
@@ -145,7 +147,8 @@ from langchain_core.messages import AIMessage
 import json
 import streamlit as st
 from utils import build_conversation_payload
-
+import logging
+logger = logging.getLogger("troubleshoot_actions")
 
 load_dotenv()
 
@@ -156,8 +159,8 @@ llm = ChatGoogleGenerativeAI(
 
 def troubleshoot_node(state):
     issues = state.get("detected_issues", [])
-    before_logs = state["logs"]
-    ticketId = st.session_state.get("ticketId", None)
+    before_logs =state.get("logs", "")
+    ticketId = state.get("ticketId", None)
     safe_actions = []
     executed_results = []
     
@@ -192,13 +195,13 @@ def troubleshoot_node(state):
         for cmd in safe_actions:
             try:
                 result = ssh_run(cmd)
-                logging.info(f"{ticketId}: Executed command: {cmd}")
+                logger.info(f"{ticketId}: Executed command: {cmd}")
                 executed_results.append({
                     "command": cmd,
                     "output": result
                 })
             except Exception as e:
-                logging.error(f"{ticketId}: Error executing command {cmd}: {e}")
+                logger.error(f"{ticketId}: Error executing command {cmd}: {e}")
 
         # 3. Re-collect logs
         troubleshoot_ai_msg += f"\nRe-collecting logs...\n"

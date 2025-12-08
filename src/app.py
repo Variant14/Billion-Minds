@@ -41,6 +41,10 @@ import logging
 # Configure basic logging to console for debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Set up logging to multiple files
+logger.addHandler(logging.FileHandler("log_calls.log"))
+logger.addHandler(logging.FileHandler("troubleshoot_actions.log"))
+logger.addHandler(logging.FileHandler("command_calls.log"))
 
 # --- Qdrant client for DB (users & tickets) ---
 from qdrant_client import QdrantClient
@@ -2112,7 +2116,8 @@ elif st.session_state.awaiting_resolution_confirmation:
                                 troubleshoot_result = troubleshoot_node({
                                     "logs": logs,
                                     "detected_issues": issues,
-                                    "category": category
+                                    "category": category,
+                                    "ticketId": ticketId
                                 })
                                 if troubleshoot_result and "summary" in troubleshoot_result:
                                     ai_msg_auto += "\n**Troubleshooting Summary:**\n"

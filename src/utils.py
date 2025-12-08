@@ -391,11 +391,6 @@ def create_conversation(payload):
     pass
 
 
-import logging
-
-logging.basicConfig(filename=f"./actions.log", level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s")
-
 def ssh_run(command):
     host = "192.168.56.103"
     username = "lahiru"
@@ -410,10 +405,8 @@ def ssh_run(command):
     err = stderr.read().decode()
     ssh.close()
     if out:
-        logging.info(out)
         return out
     if err:
-        logging.error(err)
         return err
 
 
@@ -453,3 +446,64 @@ async def execute_action(cmd: str):
         async for message in ws:
             data = json.loads(message)
             print(data)
+
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import json
+import uuid
+import logging
+logger = logging.getLogger("command_calls")
+app = FastAPI()
+
+# In-memory agent registry (use Redis in production)
+connected_agents = {}  # agent_id -> websocket
+
+
+@app.websocket("/ws/agent")
+async def agent_ws(websocket: WebSocket):
+    await websocket.accept()
+
+    agent_id = None
+
+    try:
+        # Step 1: receive hello/auth message
+        hello = await websocket.receive_text()
+        data = json.loads(hello)
+
+        if data.get("type") != "hello":
+            await websocket.close(code=4001)
+            return
+
+        agent_id = data.get("agent_id")
+        token = data.get("token")
+
+        if not validate_token(agent_id, token):
+            await websocket.close(code=4003)
+            return
+
+        connected_agents[agent_id] = websocket
+        logger.info("Agent connected: %s", agent_id)
+
+        # Step 2: message loop
+        while True:
+            msg = await websocket.receive_text()
+            payload = json.loads(msg)
+
+            if payload.get("type") == "command_result":
+                handle_command_result(agent_id, payload)
+
+    except WebSocketDisconnect:
+        logger.info("Agent disconnected: %s", agent_id)
+
+    finally:
+        if agent_id in connected_agents:
+            del connected_agents[agent_id]
+
+
+def validate_token(agent_id, token):
+    # ✅ Replace with JWT / DB lookup
+    return token == "agent123"
+
+
+def handle_command_result(agent_id, payload):
+    logging.info("Result from %s: %s", agent_id, payload)
