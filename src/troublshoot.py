@@ -1,53 +1,83 @@
 from utils import ssh_run, is_allowed
-from prompts import SAFE_COMMAND_GENERATION_PROMPT, FIX_COMPARE_PROMPT, ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT
-from langchain.tools import tool
+from prompts import SAFE_COMMAND_GENERATION_PROMPT, FIX_COMPARE_PROMPT, ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT, LOG_COMMAND_GENERATION_PROMPT
 import logging
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+import json
+import streamlit as st
 
-logging.basicConfig(filename=f"./troubleshooting.log", level=logging.INFO,
+load_dotenv()
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    temperature=0.4
+    )
+
+logging.basicConfig(filename=f"./log_analysis.log", level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s")
 
-LOG_COMMANDS = {
-    "network": [
-        "ping -c 3 8.8.8.8",
-        "dig google.com",
-        "ip a",
-    ],
-    "performance": [
-        "top -b -n 1 | head -n 5",
-        "free -m",
-        "df -h",
-    ],
-    "software": [
-        "systemctl --failed",
-        "journalctl -p 3 -n 20",
-    ],
-    "general": [
-        "uptime",
-        "dmesg | tail -n 50",
-        "journalctl -n 30"
-    ]
-}
+# LOG_COMMANDS = {
+#     "network": [
+#         "ping -c 3 8.8.8.8",
+#         "dig google.com",
+#         "ip a",
+#     ],
+#     "performance": [
+#         "top -b -n 1 | head -n 5",
+#         "free -m",
+#         "df -h",
+#     ],
+#     "software": [
+#         "systemctl --failed",
+#         "journalctl -p 3 -n 20",
+#     ],
+#     "general": [
+#         "uptime",
+#         "dmesg | tail -n 50",
+#         "journalctl -n 30"
+#     ]
+# }
 
-@tool
-def log_collector(cmd: str) -> str:
-    """Runs a command on the target system to retrieve relevant logs and returns the output."""
-    return ssh_run(cmd)
+def log_commands_generator_node(category):
+    prompt = LOG_COMMAND_GENERATION_PROMPT.format(category=category)
 
+    try:
+        response = llm.invoke(prompt).content
+        if response is None:
+            return []
+        output = json.loads(response)
+        print("Log commands generated:")
+        print(output)
+        return output
+    except Exception as e:
+        print("Error occurred during log commands generation:", e)
+        return []
+    
 
 def log_collector_node(category):
     """Collects logs from the target system based on the specified category."""
-    selected_commands = LOG_COMMANDS.get(category, LOG_COMMANDS["general"])
-    print(selected_commands)
+    selected_commands =  st.session_state.get("log_commands", log_commands_generator_node(category))
+
+    if not selected_commands or len(selected_commands) == 0:
+        return {"logs": {}}
 
     logs = {}
     
     for cmd in selected_commands:
+        print(f"Executing command: {cmd.command}")
         try:
-            logs[cmd] = ssh_run(cmd)
+            if not is_allowed(cmd.command):
+                print(f"Command {cmd.command} is not allowed")
+                continue
+            st.markdown(f"{cmd.message}")
+            logs[cmd.command] = ssh_run(cmd.command)
+            logging.info(f"Executed command: {cmd.command}")
         except Exception as e:
-            print(f"Error executing command {cmd}: {e}")
-            logs[cmd] = f"ERROR executing command {cmd}: {e}"
+            print(f"Error executing command {cmd.command}: {e}")
+            logging.error(f"Error executing command {cmd.command}: {e}")
+            logs[cmd.command] = f"ERROR executing command {cmd.command}: {e}"
     return {"logs": logs}
+    
 
 
 from dotenv import load_dotenv
@@ -60,7 +90,6 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0.4
     )
-    
 
 # ------------- Diagnostics Node -------------
 def diagnostics_node(logs, context):
@@ -89,8 +118,6 @@ def scanning_node(logs, context):
     )
 
     try:
-        tools = [is_allowed, log_collector]
-        llm.bind_tools(tools)
         response = llm.invoke(prompt).content
         if response is None:
             return {"detected_issues": []}
@@ -146,7 +173,6 @@ def troubleshoot_node(state):
                 # Check whitelisted regex first
                 if not is_allowed(cmd):
                     continue
-
                 safe_actions.append(cmd) 
 
 
@@ -154,12 +180,15 @@ def troubleshoot_node(state):
         troubleshoot_ai_msg += f"\nExecuting troubleshooting actions...\n"
         st.info(f"Executing troubleshooting actions...")
         for cmd in safe_actions:
-            result = ssh_run(cmd)
-            logging.info(f"{ticketId}: Executed command: {cmd}")
-            executed_results.append({
-                "command": cmd,
-                "output": result
-            })
+            try:
+                result = ssh_run(cmd)
+                logging.info(f"{ticketId}: Executed command: {cmd}")
+                executed_results.append({
+                    "command": cmd,
+                    "output": result
+                })
+            except Exception as e:
+                logging.error(f"{ticketId}: Error executing command {cmd}: {e}")
 
         # 3. Re-collect logs
         troubleshoot_ai_msg += f"\nRe-collecting logs...\n"
@@ -174,17 +203,20 @@ def troubleshoot_node(state):
             beforeLog=json.dumps(before_logs, indent=2),
             afterLog=json.dumps(after_logs, indent=2)
         )
-        troubleshoot_ai_msg += f"\nComparing logs before and after troubleshooting...\n"
+        troubleshoot_ai_msg += f"\nComparing logs before and after troubleshooting...\n\n"
         st.markdown(f"Comparing logs before and after troubleshooting...")
         response = llm.invoke(prompt).content
         if response is None:
-            troubleshoot_ai_msg += f"ERROR: Failed to compare logs before and after troubleshooting"
+            troubleshoot_ai_msg += f"ERROR: Failed to compare logs before and after troubleshooting\n\n"
             st.error("ERROR: Failed to compare logs before and after troubleshooting")
             st.session_state.chat_history.append(AIMessage(troubleshoot_ai_msg))
             build_conversation_payload(ticketId, troubleshoot_ai_msg, False)
             return state
         output = json.loads(response)
         # return structured diagnostics
+        troubleshoot_ai_msg += f"\nComparison completed\n\n"
+        st.session_state.chat_history.append(AIMessage(troubleshoot_ai_msg))
+        build_conversation_payload(ticketId, troubleshoot_ai_msg, False)
         return {"summary": output}
     except Exception as e:
         print("Error occurred:", e)

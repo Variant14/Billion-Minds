@@ -29,7 +29,7 @@ from utils import (
 from langchain_core.messages import HumanMessage, AIMessage
 
 # --- Troubleshooting Imports ---
-from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node, scanning_node
+from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node
 
 # =============================
 # INITIALIZATION
@@ -205,7 +205,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                     # Run diagnostics
                     ai_msg_auto = "**Running diagnostics...**\n\n"
                     st.markdown("**Running diagnostics...**")
-                    diagnostics_node_result = scanning_node(logs, st.session_state.chat_history)
+                    diagnostics_node_result = diagnostics_node(logs, st.session_state.chat_history)
                     
                     # Build AI message with issues and commands
                     if diagnostics_node_result and "detected_issues" in diagnostics_node_result:
