@@ -1360,7 +1360,8 @@ def generate_clarification_questions(user_query):
     template = """
 You are an IT Support Technician. The user has described an issue: "{user_question}".
 Your knowledge base returned insufficient context.
-Generate 5 specific, numbered diagnostic questions (Q1-Q5) to clarify the problem.
+Generate 3 specific, numbered diagnostic questions (Q1-Q3) to clarify the problem.
+Only give the questions, no need to add any other texts
 Do NOT provide a solution.
     """
 
@@ -1529,7 +1530,7 @@ Your response:"""
 
 def get_next_clarification():
     idx = st.session_state.clarification_index + 1
-    if idx < len(st.session_state.clarification_questions):
+    if idx < 3:
         st.session_state.clarification_index = idx
         return iter([st.session_state.clarification_questions[idx]])
     st.session_state.clarification_mode = False
@@ -1929,7 +1930,7 @@ if st.session_state.clarification_mode:
         st.rerun()
 
     # 2) Index out of range → move to final diagnosis
-    if idx >= len(questions):
+    if idx >= 3:
         st.session_state.clarification_mode = False
         context_override = "User clarification answers:\n" + "\n".join(st.session_state.clarification_answers)
         ai_stream = get_rag_answer("Final comprehensive diagnosis and solution", context_override=context_override)
@@ -1941,6 +1942,7 @@ if st.session_state.clarification_mode:
     # ---- SHOW NEXT QUESTION ----
     next_q = questions[idx]
     with st.chat_message("AI"):
+        #st.session_state.chat_history.append(AIMessage(next_q))
         st.markdown(next_q)
 
     ans = st.chat_input("Answer the clarification question:")
@@ -1953,7 +1955,7 @@ if st.session_state.clarification_mode:
 
 #Ask if the provided resolution steps worked
 elif st.session_state.show_buttons:
-    ticketId = st.session_state.ticketId
+    ticketId = st.session_state.current_ticket_id
     st.markdown("---")
     with st.chat_message("AI"):
         build_conversation_payload(ticketId,"Was your issue resolved?", False)
@@ -2013,7 +2015,7 @@ elif st.session_state.show_buttons:
 # --- AI resolution confirmation ---
 elif st.session_state.awaiting_resolution_confirmation:
     # Prompt for AI fix attempt
-    ticketId = st.session_state.ticketId
+    ticketId = st.session_state.current_ticket_id
     st.markdown("---")
     with st.chat_message("AI"):
         ai_msg = "AI can attempt an automatic fix. Do you want to proceed?"
@@ -2206,7 +2208,7 @@ elif st.session_state.awaiting_technician_confirmation:
             st.rerun()
 
 elif st.session_state.technician_assign:
-    ticketId = st.session_state.ticketId
+    ticketId = st.session_state.current_ticket_id
     st.markdown("---")
     ai_msg = f"🎫 Your ticket **#{ticketId}** has been created. A technician will reach out soon."
     st.success(ai_msg)
