@@ -1945,7 +1945,6 @@ if st.session_state.clarification_mode:
 
     ans = st.chat_input("Answer the clarification question:")
     if ans:
-        build_conversation_payload(st.session_state.ticketId, ans, True)
         st.session_state.chat_history.append(HumanMessage(ans))
         st.session_state.clarification_answers.append(ans)
         st.session_state.clarification_index += 1
@@ -2230,7 +2229,7 @@ else:
 
         # handle user query (this will also create/update ticket title/description and append conversation)
         with st.chat_message("AI"):
-            ai_stream, should_show_buttons = handle_user_query(user_query, retriever,GEMINI_KEY)
+            ai_stream, should_show_buttons = handle_user_query(user_query)
             
             final = st.write_stream(ai_stream)
             # Save AI reply to conversation as well
