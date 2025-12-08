@@ -419,7 +419,7 @@ def ssh_run(command):
 
 def load_commands_whitelist():
     try:
-        with open("./src/allowed_rules.txt") as f:
+        with open("./Billion-Minds/src/allowed_rules.txt") as f:
             return [line.strip() for line in f.readlines() if line.strip()]
     except Exception as e:
         print(f"Error loading whitelist: {e}")
