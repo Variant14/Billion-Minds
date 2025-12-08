@@ -1,4 +1,4 @@
-from utils import ssh_run, is_allowed
+from utils import ssh_run, is_allowed, ALLOWED_COMMANDS
 from prompts import SAFE_COMMAND_GENERATION_PROMPT, FIX_COMPARE_PROMPT, ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT, LOG_COMMAND_GENERATION_PROMPT
 import logging
 from dotenv import load_dotenv
@@ -38,7 +38,8 @@ llm = ChatGoogleGenerativeAI(
 def log_commands_generator_node(category):
     prompt = LOG_COMMAND_GENERATION_PROMPT.format(
         context=st.session_state.get("chat_history", []),
-        issue_category=category
+        issue_category=category,
+        allowed_command_patterns = ALLOWED_COMMANDS
         )
 
     try:
@@ -69,20 +70,20 @@ def log_collector_node(category):
     print(selected_commands)
     
     for cmd in selected_commands:
-        print(f"Executing command: {cmd.command}")
+        print(f"Executing command: {cmd.get('command')}")
         try:
-            if not is_allowed(cmd.command):
-                print(f"Command {cmd.command} is not allowed")
+            if not is_allowed(cmd.get('command')):
+                print(f"Command {cmd.get('command')} is not allowed")
                 continue
-            st.markdown(f"{cmd.message}")
-            st.session_state.chat_history.append(AIMessage(cmd.message))
-            build_conversation_payload(st.session_state.ticketId, cmd.message, False)
-            logs[cmd.command] = ssh_run(cmd.command)
-            logging.info(f"Executed command: {cmd.command}")
+            st.markdown(f"{cmd.get("message")}")
+            st.session_state.chat_history.append(AIMessage(cmd.get("message")))
+            build_conversation_payload(st.session_state.ticketId, cmd.get("message"), False)
+            logs[cmd.get('command')] = ssh_run(cmd.get('command'))
+            logging.info(f"Executed command: {cmd.get('command')}")
         except Exception as e:
-            print(f"Error executing command {cmd.command}: {e}")
-            logging.error(f"Error executing command {cmd.command}: {e}")
-            logs[cmd.command] = f"ERROR executing command {cmd.command}: {e}"
+            print(f"Error executing command {cmd.get('command')}: {e}")
+            logging.error(f"Error executing command {cmd.get('command')}: {e}")
+            logs[cmd.get('command')] = f"ERROR executing command {cmd.get('command')}: {e}"
     return {"logs": logs}
     
 
@@ -102,7 +103,8 @@ llm = ChatGoogleGenerativeAI(
 def diagnostics_node(logs, context):
     prompt = SAFE_COMMAND_GENERATION_PROMPT.format(
         logs=json.dumps(logs, indent=2),
-        context=context
+        context=context,
+        allowed_command_patterns = ALLOWED_COMMANDS
     )
 
     try:
@@ -175,12 +177,13 @@ def troubleshoot_node(state):
             suggested_commands = issue.get("suggested_commands", None)
             if suggested_commands is None:
                 continue
+            print(suggested_commands)
             for cmd in issue["suggested_commands"]:
 
                 # Check whitelisted regex first
-                if not is_allowed(cmd):
+                if not is_allowed(cmd.get("command")):
                     continue
-                safe_actions.append(cmd) 
+                safe_actions.append(cmd.get("command")) 
 
 
         # 2. Execute safe commands
