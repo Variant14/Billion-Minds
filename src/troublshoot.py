@@ -77,7 +77,7 @@ def log_collector_node(category):
                 continue
             st.markdown(f"{cmd.get("message")}")
             st.session_state.chat_history.append(AIMessage(cmd.get("message")))
-            build_conversation_payload(st.session_state.ticketId, cmd.get("message"), False)
+            build_conversation_payload(st.session_state.current_ticket_id, cmd.get("message"), False)
             logs[cmd.get('command')] = ssh_run(cmd.get('command'))
             logging.info(f"Executed command: {cmd.get('command')}")
         except Exception as e:
@@ -204,7 +204,7 @@ def troubleshoot_node(state):
         troubleshoot_ai_msg += f"\nRe-collecting logs...\n"
         st.markdown(f"Re-collecting logs...")
         
-        after_logs_state = log_collector_node(st.session_state.ticket.get("category", "General"))
+        after_logs_state = log_collector_node(state.get("category", "General"))
         after_logs = after_logs_state["logs"]
 
         # 4. Compare logs

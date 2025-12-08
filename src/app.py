@@ -71,6 +71,7 @@ DEFAULTS = {
     # Added defaults for ticket tracking
     "current_ticket_id": None,
     "ticket_created": False,
+    "log_commands": []
 }
 
 for k, v in DEFAULTS.items():
@@ -1316,6 +1317,7 @@ def reset_chat():
     st.session_state.show_reset_countdown = False
     st.session_state.current_ticket_id = None
     st.session_state.ticket_created = False
+    st.session_state.log_commands = []
 
 def is_technical_issue(user_query):
     """Detect if user query is a technical issue that needs resolution"""
@@ -2013,6 +2015,7 @@ elif st.session_state.show_buttons:
 elif st.session_state.awaiting_resolution_confirmation:
     # Prompt for AI fix attempt
     ticketId = st.session_state.current_ticket_id
+
     st.markdown("---")
     with st.chat_message("AI"):
         ai_msg = "AI can attempt an automatic fix. Do you want to proceed?"
@@ -2032,7 +2035,16 @@ elif st.session_state.awaiting_resolution_confirmation:
                 build_conversation_payload(ticketId, ai_msg_auto, False)
                 st.session_state.chat_history.append(AIMessage(ai_msg_auto))
                 st.session_state.show_buttons = False
-                
+                ticket_payload = None
+                try:
+                    result = qdrant.retrieve(
+                        collection_name="tickets",
+                        ids=[uuid.UUID(ticketId)]
+                    )  
+
+                    ticket_payload = result[0].payload if result else None
+                except:
+                    raise Exception("Error retreiving ticket payload")
                 with st.spinner("🔄 Processing your request..."):
                     with st.chat_message("AI"):
                         ai_msg_auto = "**Analyzing logs...**"
@@ -2041,7 +2053,7 @@ elif st.session_state.awaiting_resolution_confirmation:
                         build_conversation_payload(ticketId, ai_msg_auto, False)
                     
                     # Collect logs
-                    category = st.session_state.ticket.get("category", "General")
+                    category = ticket_payload.get("category", "General")
                     logs = log_collector_node(category)["logs"]
                     ai_msg_auto = "**Logs collected. Running diagnostics...**"
                     st.markdown(f"{ai_msg_auto}")
@@ -2099,7 +2111,8 @@ elif st.session_state.awaiting_resolution_confirmation:
                                 # Execute troubleshooting node
                                 troubleshoot_result = troubleshoot_node({
                                     "logs": logs,
-                                    "detected_issues": issues
+                                    "detected_issues": issues,
+                                    "category": category
                                 })
                                 if troubleshoot_result and "summary" in troubleshoot_result:
                                     ai_msg_auto += "\n**Troubleshooting Summary:**\n"
