@@ -126,8 +126,6 @@ def ensure_metadata_collection(name: str, dim: int):
             st.error(f"Could not create Qdrant collection '{name}': {e}")
             st.stop()
 
-qdrant.delete_collection("knowledge_vectors")
-qdrant.delete_collection("knowledge_base")
 
 
 # 1-dimensional collections (no embeddings)
@@ -666,19 +664,15 @@ COL_KNOWLEDGE = "knowledge_base"
 # RAG pipeline using it_kb_vectors collection
 # =============================
 @st.cache_resource
+@st.cache_resource
 def setup_rag_pipeline():
-    """
-    Build retriever from it_kb_vectors collection.
-    If the vectors collection is empty, seed it with documents from src/it_docs and from existing KB summaries.
-    Returns None if setup fails - fallback methods will be used instead.
-    """
-    DATA_PATH = BASE_DIR / "src/it_docs"
-    # 1) Seed vectors if collection is empty
+    DATA_PATH =  "src/it_docs"
+
     try:
-        # check if any points exist in the vector collection
         points, _ = qdrant.scroll(collection_name=COL_VECTORS, limit=1)
+
         if not points:
-            # load docs from it_docs
+
             if os.path.exists(DATA_PATH) and os.listdir(DATA_PATH):
                 loader = DirectoryLoader(str(DATA_PATH), glob="**/*.txt")
                 raw_docs = loader.load()
@@ -686,28 +680,29 @@ def setup_rag_pipeline():
                 docs = splitter.split_documents(raw_docs)
                 texts = [d.page_content for d in docs]
                 vectors = embed_texts(texts)
-                points = []
-                for i, v in enumerate(vectors):
-                    payload = {"source": "it_docs", "text": texts[i]}
-                    points.append(rest.PointStruct(id=str(uuid.uuid4()), vector=v, payload=payload))
-                if points:
-                    qdrant.upsert(collection_name=COL_VECTORS, points=points)
-            # seed from existing knowledge_base summaries
+
+                seed_points = [
+                    rest.PointStruct(id=str(uuid.uuid4()), vector=v, payload={"source":"it_docs","text":t})
+                    for t, v in zip(texts, vectors)
+                ]
+                qdrant.upsert(collection_name=COL_VECTORS, points=seed_points)
+
+            # Seed KB
             kb_points, _ = qdrant.scroll(collection_name=COL_KNOWLEDGE, limit=2000)
-            seed = []
+
+            seed_kb = []
             for p in kb_points:
-                payload = p.payload or {}
-                summary = payload.get("summary")
+                summary = (p.payload or {}).get("summary")
                 if summary:
                     v = embed_text(summary)
-                    seed.append(rest.PointStruct(id=str(uuid.uuid4()), vector=v, payload={"source":"kb","kb_id": payload.get("id"), "summary": summary}))
-            if seed:
-                qdrant.upsert(collection_name=COL_VECTORS, points=seed)
-    except Exception as e:
-        st.warning(f"RAG seeding issue: {e}")
+                    seed_kb.append(rest.PointStruct(id=str(uuid.uuid4()), vector=v, payload=p.payload))
+            if seed_kb:
+                qdrant.upsert(collection_name=COL_VECTORS, points=seed_kb)
 
-    # Create a langchain Qdrant vectorstore wrapper for retrieval
-    # If this fails, return None - the app will use manual_vector_search instead
+    except Exception as e:
+        st.error(f"❌ RAG seeding error: {e}")
+
+    # Create retriever
     try:
         vector_store = Qdrant(
             client=qdrant,
@@ -716,9 +711,11 @@ def setup_rag_pipeline():
         )
         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
         return retriever
+
     except Exception as e:
-        st.info(f"LangChain retriever unavailable, using direct Qdrant search: {e}")
+        st.error(f"❌ Cannot create retriever: {e}")
         return None
+
 
 retriever = setup_rag_pipeline()
 
@@ -2003,7 +2000,7 @@ elif st.session_state.show_buttons:
             st.session_state.chat_history.append(HumanMessage("No"))
 
             # Evaluate if AI can solve the issue
-            chat_context = "\n".join([msg.content for msg in st.session_state.chat_history[-10:]])
+            chat_context = "\n".join(msg.content for msg in st.session_state.chat_history)
             can_ai_solve = evaluate_ai_capability(chat_context)
             
             if can_ai_solve:
