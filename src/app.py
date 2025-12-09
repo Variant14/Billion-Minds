@@ -53,6 +53,8 @@ from qdrant_client.http import models as rest
 
 # --- Troubleshooting Imports ---
 from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node, start_auto_fix
+from utils import render_ui_messages, start_ws
+import threading
 
 # =============================
 # STREAMLIT STATE INITIALIZATION
@@ -77,7 +79,9 @@ DEFAULTS = {
     "current_ticket_id": None,
     "ticket_created": False,
     "log_commands": [],
-    "agent_id": None
+    "agent_id": "agent123",
+    "ui_message_queue": asyncio.Queue(),
+    "server_started": False
 }
 
 for k, v in DEFAULTS.items():
@@ -2036,6 +2040,10 @@ elif st.session_state.awaiting_resolution_confirmation:
                 build_conversation_payload(ticketId, user_msg, True)
                 st.session_state.chat_history.append(HumanMessage(user_msg))
                 
+                if not st.session_state.server_started:
+                    threading.Thread(target=start_ws).start()
+                    st.session_state.server_started = True
+                
                 ai_msg_auto = "Please wait while the chat-bot is running System Automation Checks"
                 build_conversation_payload(ticketId, ai_msg_auto, False)
                 st.session_state.chat_history.append(AIMessage(ai_msg_auto))
@@ -2053,111 +2061,16 @@ elif st.session_state.awaiting_resolution_confirmation:
                     category = ticket_payload.get("category", "General")
                     agentId = st.session_state.agent_id
                     context = st.session_state.chat_history
-                    asyncio.create_task(start_auto_fix(ticketId, agentId, context, category))
+                    render_ui_messages()
+                    asyncio.create_task(start_auto_fix({
+                            "ticketId": ticketId, 
+                            "agentId": agentId, 
+                            "context": context, 
+                            "category": category
+                        }
+                        ))._blocking = True
                 except:
                     raise Exception("Error retreiving ticket payload")
-                with st.spinner("🔄 Processing your request..."):
-                    with st.chat_message("AI"):
-                        ai_msg_auto = "**Analyzing logs...**"
-                        st.markdown(f"{ai_msg_auto}")
-                        st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                        build_conversation_payload(ticketId, ai_msg_auto, False)
-                    
-                    # Collect logs
-                    logs = log_collector_node(category)["logs"]
-                    ai_msg_auto = "**Logs collected. Running diagnostics...**"
-                    st.markdown(f"{ai_msg_auto}")
-                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                    build_conversation_payload(ticketId, ai_msg_auto, False)
-                    
-                    
-                    # Run diagnostics
-                    ai_msg_auto = "**Running diagnostics...**\n\n"
-                    st.markdown("**Running diagnostics...**")
-                    diagnostics_node_result = diagnostics_node(logs, st.session_state.chat_history)
-                    
-                    # Build AI message with issues and commands
-                    if diagnostics_node_result and "detected_issues" in diagnostics_node_result:
-                        issues = diagnostics_node_result["detected_issues"]
-                        
-                        if issues:
-                            # Display issues in UI
-                            ai_msg_auto += "**Diagnostics completed. Issues detected:**\n\n"
-                            st.markdown("**Diagnostics completed. Issues detected:**")
-                            
-                            # Build formatted message for chat history
-                            # issues_message = "**Diagnostic Results:**\n\n**Issues Detected:**\n"
-                            
-                            for idx, issue in enumerate(issues, 1):
-                                issue_text = issue.get('issue', 'Unknown issue')
-                                ai_msg_auto += f"{idx}. {issue_text}"
-                                human_intervention = issue.get('human_intervention_needed', False)
-                                if human_intervention:
-                                    ai_msg_auto += " - Human intervention needed.\n"
-                                    st.markdown(f" {idx}. {issue_text} - Human intervention needed.")
-                                else:
-                                    st.markdown(f" {idx}. {issue_text}")
-                                    ai_msg_auto += "\n"                                           
-                                
-                            if all(issue.get("suggested_commands") is None or len(issue.get("suggested_commands")) == 0 for issue in issues):
-                                ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
-                                st.warning("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.")
-                                build_conversation_payload(ticketId, ai_msg_auto, False)
-                                st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                                # Call for human intervention
-                                st.session_state.awaiting_resolution_confirmation = False
-                                st.session_state.awaiting_technician_confirmation = True
-                                
-                            
-                            elif any(issue.get("human_intervention_needed", False) and idx < len(issues) - idx for idx, issue in enumerate(issues)):
-                                ai_msg_auto += "\n_⚠️ Some critical issues require human intervention. Please consider escalating to a technician._\n"
-                                st.warning("⚠️ Some critical issues require human intervention. Please consider escalating to a technician.")
-                                build_conversation_payload(ticketId, ai_msg_auto, False)
-                                st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                                # Call for human intervention
-                                st.session_state.awaiting_resolution_confirmation = False
-                                st.session_state.awaiting_technician_confirmation = True
-                            else:
-                                # Execute troubleshooting node
-                                troubleshoot_result = troubleshoot_node({
-                                    "logs": logs,
-                                    "detected_issues": issues,
-                                    "category": category,
-                                    "ticketId": ticketId
-                                })
-                                if troubleshoot_result and "summary" in troubleshoot_result:
-                                    ai_msg_auto += "\n**Troubleshooting Summary:**\n"
-                                    st.markdown("**Troubleshooting Summary:**")
-                                    st.json(troubleshoot_result["summary"])
-                                    build_conversation_payload(ticketId, ai_msg_auto, False)
-                                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                                    st.session_state.chat_history.append(AIMessage(troubleshoot_result["summary"]))
-                                    build_conversation_payload(ticketId, troubleshoot_result["summary"], False)
-                                    st.session_state.awaiting_resolution_confirmation = False
-                                    st.session_state.show_buttons = True
-                                else:
-                                    ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
-                                    st.warning("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.")
-                                    build_conversation_payload(ticketId, ai_msg_auto, False)
-                                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                                    # Call for human intervention
-                                    st.session_state.awaiting_resolution_confirmation = False
-                                    st.session_state.awaiting_technician_confirmation = True
-                        else:
-                            no_issues_msg = "✅ No issues detected. System appears to be functioning normally."
-                            st.info(no_issues_msg)
-                            build_conversation_payload(ticketId, no_issues_msg, False)
-                            st.session_state.chat_history.append(AIMessage(no_issues_msg))
-                            st.session_state.awaiting_resolution_confirmation = False
-                            st.session_state.awaiting_technician_confirmation = True
-                    else:
-                        warning_msg = "⚠️ Diagnostics completed but no results were returned."
-                        st.warning(warning_msg)
-                        build_conversation_payload(ticketId, warning_msg, False)
-                        st.session_state.chat_history.append(AIMessage(warning_msg))
-                        st.session_state.awaiting_resolution_confirmation = False
-                        st.session_state.awaiting_technician_confirmation = True
-                
             except Exception as e:
                 error_msg = f"⚠️ An error occurred during diagnostics: {str(e)}"
                 st.error(error_msg)

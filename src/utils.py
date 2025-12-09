@@ -437,104 +437,60 @@ def is_allowed(cmd: str) -> bool:
 
 import websockets
 import json
-
-async def execute_action(cmd: str):
-    url="ws://127.0.0.1:5001/ws?token=MyS3CR37C0D3"
-    async with websockets.connect(url) as ws:
-        await ws.send(json.dumps({"cmd":cmd}))
-
-        async for message in ws:
-            data = json.loads(message)
-            print(data)
-
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import json
-import uuid
 import logging
 import asyncio
-import streamlit as st
 logger = logging.getLogger("command_calls")
-app = FastAPI()
 
-# In-memory agent registry (use Redis in production)
-connected_agents = {}  # agent_id -> websocket
+agent = None
+# agent_messages = asyncio.Queue()
 
-
-@app.websocket("/ws/agent")
-async def agent_ws(websocket: WebSocket):
-    await websocket.accept()
-
-    agent_id = None
-
+async def ws_handler(websocket):
+    global agent
+    agent = websocket
     try:
-        # Step 1: receive hello/auth message
-        hello = await websocket.receive_text()
-        data = json.loads(hello)
-
-        if data.get("type") != "hello":
-            await websocket.close(code=4001)
-            return
-
-        agent_id = data.get("agent_id")
-        token = data.get("token")
-
-        if not validate_token(agent_id, token):
-            await websocket.close(code=4003)
-            return
-
-        connected_agents[agent_id] = websocket
-        logger.info("Agent connected: %s", agent_id)
-
-        # Step 2: message loop
         while True:
-            msg = await websocket.receive_text()
-            payload = json.loads(msg)
+            result = await websocket.recv()
+            data = json.loads(result)
+            st.session_state.ui_message_queue.put(data)
+    except :
+        agent = None
+        print("Agent disconnected")
+        pass
 
-            if payload.get("type") == "command_result":
-                handle_command_result(agent_id, payload)
+async def ws_server():
+    async with websockets.serve(ws_handler, "127.0.0.1", 5001):
+        await asyncio.Future()
 
-    except WebSocketDisconnect:
-        logger.info("Agent disconnected: %s", agent_id)
+def start_ws():
+    asyncio.run(ws_server())
 
-    finally:
-        if agent_id in connected_agents:
-            del connected_agents[agent_id]
+def render_ui_messages():
+    placeholder = st.empty()
+
+    messages = []
+
+    while not st.session_state.ui_message_queue.empty():
+        msg = st.session_state.ui_message_queue.get_nowait()
+        messages.append(msg)
+
+    for msg in messages:
+        if msg["state"] == "success":
+            placeholder.success(msg["message"])
+        elif msg["state"] == "human_intervention_needed":
+            placeholder.error(msg["message"])
+        elif msg["state"] == "set":
+            payload = json.loads(msg["message"])
+            st.session_state[payload["key"]] = payload["value"]
+        else:
+            placeholder.info(msg["message"])
 
 
-def validate_token(agent_id, token):
-    # ✅ Replace with JWT / DB lookup
-    return token == "agent123"
-
-
-def handle_command_result(agent_id, payload):
-    logging.info("Result from %s: %s", agent_id, payload)
-    
-
-pending_requests = {}  # request_id -> asyncio.Future
-
-
-async def send_command_and_wait(agent_id, command, timeout=15):
-    request_id = str(uuid.uuid4())
-    loop = asyncio.get_event_loop()
-    future = loop.create_future()
-
-    pending_requests[request_id] = future
-
-    ws = st.session_state.agent_id
-    if not ws:
-        raise Exception("Please make sure your agent is up and running.")
-
-    message = {
-        "type": "run_command",
-        "request_id": request_id,
-        "command": command
+async def send_command_request(payload):
+    if not agent:
+        raise Exception("Agent not connected")
+    data = {
+        "request_id": payload.get("request_id"),
+        "command": payload.get("command"),
+        "agent_Id": payload.get("agentId")
     }
-
-    await ws.send_text(json.dumps(message))
-
-    try:
-        result = await asyncio.wait_for(future, timeout)
-        return result
-    finally:
-        pending_requests.pop(request_id, None)
+    await agent.send(json.dumps(data))

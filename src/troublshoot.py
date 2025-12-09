@@ -1,4 +1,4 @@
-from utils import ssh_run, is_allowed, ALLOWED_COMMANDS
+from utils import ssh_run, is_allowed, ALLOWED_COMMANDS, send_command_request
 from prompts import SAFE_COMMAND_GENERATION_PROMPT, FIX_COMPARE_PROMPT, ISSUE_DETECTION_AND_SAFE_COMMAND_GENERATION_PROMPT, LOG_COMMAND_GENERATION_PROMPT
 import logging
 from dotenv import load_dotenv
@@ -35,9 +35,9 @@ llm = ChatGoogleGenerativeAI(
 #     ]
 # }
 
-def log_commands_generator_node(category):
+def log_commands_generator_node(category, context):
     prompt = LOG_COMMAND_GENERATION_PROMPT.format(
-        context=st.session_state.get("chat_history", []),
+        context=context,
         issue_category=category,
         allowed_command_patterns = ALLOWED_COMMANDS
         )
@@ -52,20 +52,16 @@ def log_commands_generator_node(category):
         return output
     except Exception as e:
         print("Error occurred during log commands generation:", e)
-        return []
+        return None
     
 
 import logging
+import uuid
 logger = logging.getLogger("log_calls")
 
-def log_collector_node(category):
+async def log_collector_node(ticketId, agentId, selected_commands):
     """Collects logs from the target system based on the specified category."""
-    selected_commands =  st.session_state.get("log_commands")
-    ticketId = st.session_state.get("current_ticket_id")
-
-    if not selected_commands or len(selected_commands) == 0:
-        selected_commands = log_commands_generator_node(category)
-        st.session_state.log_commands = selected_commands
+    print(f"Collecting logs for ticket {ticketId}...")
 
     logs = {}
     print("selected commands:\n\n")
@@ -77,66 +73,32 @@ def log_collector_node(category):
             if not is_allowed(cmd.get('command')):
                 print(f"Command {cmd.get('command')} is not allowed")
                 continue
-            st.markdown(f"{cmd.get("message")}")
-            st.session_state.chat_history.append(AIMessage(cmd.get("message")))
-            build_conversation_payload(st.session_state.current_ticket_id, cmd.get("message"), False)
-            logs[cmd.get('command')] = ssh_run(cmd.get('command'))
-            logger.info(f"{ticketId} Executed command: {cmd.get('command')}")
+            await notify_user(f"{cmd.get("message")}")
+            try:
+                request_id = uuid.uuid4() 
+                result = await send_command_request({
+                    "request_id": request_id,
+                    "command": cmd.get('command'),
+                    "agent_Id": agentId
+                })
+                while True:
+                    result = st.session_state.ui_message_queue.get_nowait()
+                    if result.get("request_id") == request_id:
+                        if result is None:
+                            raise Exception("Unable to collect logs for this command")
+                        data = json.loads(result)
+                        logs[cmd.get('command')] = data.get("data")
+                        print("logs collected for command", cmd.get('command'))
+                        print(data)
+                        logger.info(f"{ticketId} Command request satisfied: {cmd.get('command')}")
+                        break
+            except Exception as e:
+                print(f"Error executing command {cmd.get('command')}: {e}")
+                logger.error(f"{ticketId} Error executing command {cmd.get('command')}: {e}")
         except Exception as e:
             print(f"Error executing command {cmd.get('command')}: {e}")
             logger.error(f"{ticketId} Error executing command {cmd.get('command')}: {e}")
             logs[cmd.get('command')] = f"ERROR executing command {cmd.get('command')}: {e}"
-    return {"logs": logs}
-    
-
-import logging
-import asyncio
-from utils import send_command_and_wait
-
-logger = logging.getLogger("log_calls")
-
-
-async def log_collector_node(category, agent_id):
-    """Collect logs via WebSocket agent instead of SSH"""
-
-    selected_commands = st.session_state.get("log_commands")
-    ticketId = st.session_state.get("current_ticket_id")
-
-    if not selected_commands:
-        selected_commands = log_commands_generator_node(category)
-        st.session_state.log_commands = selected_commands
-
-    logs = {}
-
-    print("selected commands:\n", selected_commands)
-
-    for cmd in selected_commands:
-        command = cmd.get("command")
-        message = cmd.get("message")
-
-        print(f"Requesting command: {command}")
-
-        try:
-            # ✅ Keep local allow-list (defense in depth)
-            if not is_allowed(command):
-                print(f"Command not allowed: {command}")
-                continue
-
-            # ✅ UI + conversation unchanged
-            st.markdown(message)
-            st.session_state.chat_history.append(AIMessage(message))
-            build_conversation_payload(ticketId, message, False)
-
-            # ✅ WebSocket execution (REPLACEMENT)
-            result = asyncio.run(send_command_and_wait(agent_id, command))
-
-            logs[command] = result
-            logger.info(f"{ticketId}: Executed command: {command}")
-
-        except Exception as e:
-            logger.error(f"{ticketId}: Error executing {command}: {e}")
-            logs[command] = f"ERROR executing command {command}: {e}"
-
     return {"logs": logs}
 
 
@@ -207,23 +169,15 @@ llm = ChatGoogleGenerativeAI(
     temperature=0.4
     )
 
-def troubleshoot_node(state):
+async def troubleshoot_node(state):
     issues = state.get("detected_issues", [])
     before_logs =state.get("logs", "")
     ticketId = state.get("ticketId", None)
+    agentId = state.get("agentId", None)
+    log_commands = state.get("selected_commands", [])
+    
     safe_actions = []
     executed_results = []
-    
-    troubleshoot_ai_msg = "\n**Troubleshooting starts now...**\n"
-    markdown_msg = "**Troubleshooting starts now...**"
-    st.markdown(markdown_msg)
-
-    if ticketId is None:
-        error_msg = "Something went wrong, unable to continue without a Ticket Id"
-        markdown_msg = "⚠️ " + error_msg
-        st.error(error_msg)
-        st.session_state.chat_history.append(AIMessage(markdown_msg))
-        return {}
     
     try:
         for issue in issues:
@@ -240,10 +194,27 @@ def troubleshoot_node(state):
 
 
         # 2. Execute safe commands
-        troubleshoot_ai_msg += f"\nExecuting troubleshooting actions...\n"
-        st.info(f"Executing troubleshooting actions...")
         for cmd in safe_actions:
             try:
+                request_id = uuid.uuid4() 
+                result = await send_command_request({
+                    "request_id": request_id,
+                    "command": cmd.get('command'),
+                    "agent_Id": agentId
+                })
+                while True:
+                    result = st.session_state.ui_message_queue.get_nowait()
+                    if result.get("request_id") == request_id:
+                        if result is None:
+                            raise Exception("Unable to collect logs for this command")
+                        data = json.loads(result)
+                        print("logs collected for command", cmd.get('command'))
+                        print(data)
+                        logger.info(f"{ticketId} Command request satisfied: {cmd.get('command')}")
+                        break
+            except Exception as e:
+                print(f"Error executing command {cmd.get('command')}: {e}")
+                logger.error(f"{ticketId} Error executing command {cmd.get('command')}: {e}")
                 result = ssh_run(cmd)
                 logger.info(f"{ticketId}: Executed command: {cmd}")
                 executed_results.append({
@@ -253,12 +224,20 @@ def troubleshoot_node(state):
             except Exception as e:
                 logger.error(f"{ticketId}: Error executing command {cmd}: {e}")
 
-        # 3. Re-collect logs
-        troubleshoot_ai_msg += f"\nRe-collecting logs...\n"
-        st.markdown(f"Re-collecting logs...")
-        
-        after_logs_state = log_collector_node(state.get("category", "General"))
-        after_logs = after_logs_state["logs"]
+        # 3. Re-collect logs      
+        result = await log_collector_node(ticketId, agentId, log_commands)
+        if result is None:
+            return {
+                "summary": None,
+                "error": "Failed to collect logs after troubleshooting"
+            }
+        data = json.loads(result)
+        after_logs = data.get("data", None)
+        if after_logs is None:
+            return {
+                "summary": None,
+                "error": "Failed to collect logs after troubleshooting"
+            }
 
         # 4. Compare logs
         # You can re-run diagnostics node here or use a comparison LLM
@@ -266,28 +245,21 @@ def troubleshoot_node(state):
             beforeLog=json.dumps(before_logs, indent=2),
             afterLog=json.dumps(after_logs, indent=2)
         )
-        troubleshoot_ai_msg += f"\nComparing logs before and after troubleshooting...\n\n"
-        st.markdown(f"Comparing logs before and after troubleshooting...")
         response = llm.invoke(prompt).content
         if response is None:
-            troubleshoot_ai_msg += f"ERROR: Failed to compare logs before and after troubleshooting\n\n"
-            st.error("ERROR: Failed to compare logs before and after troubleshooting")
-            st.session_state.chat_history.append(AIMessage(troubleshoot_ai_msg))
-            build_conversation_payload(ticketId, troubleshoot_ai_msg, False)
-            return state
+            return {
+                "summary": None,
+                "error": "Failed to compare logs before and after troubleshooting"
+            }
         output = json.loads(response)
         # return structured diagnostics
-        troubleshoot_ai_msg += f"\nComparison completed\n\n"
-        st.session_state.chat_history.append(AIMessage(troubleshoot_ai_msg))
-        build_conversation_payload(ticketId, troubleshoot_ai_msg, False)
-        return {"summary": output}
+        return {"summary": output, "error": None}
     except Exception as e:
         print("Error occurred:", e)
-        troubleshoot_ai_msg += f"ERROR: {e}"
-        st.error(f"ERROR: {e}")
-        st.session_state.chat_history.append(AIMessage(troubleshoot_ai_msg))
-        build_conversation_payload(ticketId, troubleshoot_ai_msg, False)
-        return state
+        return {
+            "summary": None,
+            "error": str(e)
+        }
   
 async def notify_user(message, state="info"):
     await st.session_state.ui_message_queue.put({
@@ -296,10 +268,36 @@ async def notify_user(message, state="info"):
     })
 
 
-async def start_auto_fix(ticketId, agentId, context, category):
+async def start_auto_fix(payload):
     print("Starting auto fix...")
+    ticketId = payload.ticketId
+    agentId = payload.agentId
+    category = payload.category
+    context = payload.context
     
-    logs = log_collector_node(category)["logs"]
+    selected_commands = payload.get("selected_commands", [])
+    # 1. Collect logs
+    if not selected_commands or len(selected_commands) == 0:
+        selected_commands = log_commands_generator_node(category)
+        if selected_commands is None:
+            await notify_user("Failed to generate commands", "error")
+            return
+        data = {
+            "key": "selected_commands",
+            "value": selected_commands
+        }
+        await notify_user(json.dumps(data), "set")
+    result = await log_collector_node(ticketId, agentId, category, selected_commands)
+    
+    if result is None:
+        await notify_user("Failed to collect logs", "error")
+        return
+    
+    data = json.loads(result)
+    logs = data.get("data", None)
+    if logs is None or logs == {}:
+        await notify_user("Failed to collect logs", "error")
+        return
     
     diagnostics_node_result = diagnostics_node(logs, context)
     
@@ -308,61 +306,80 @@ async def start_auto_fix(ticketId, agentId, context, category):
         issues = diagnostics_node_result["detected_issues"]
         
         if issues:
-            # Display issues in UI
-            await notify_user("**Diagnostics completed. Issues detected:**", "info")
-            
+            ai_msg_auto = "\n**Diagnostics completed. Issues detected:**\n"
             # Build formatted message for chat history
             # issues_message = "**Diagnostic Results:**\n\n**Issues Detected:**\n"
             for idx, issue in enumerate(issues, 1):
                 issue_text = issue.get('issue', 'Unknown issue')
                 human_intervention = issue.get('human_intervention_needed', False)
                 if human_intervention:
-                    await notify_user(f" {idx}. {issue_text} - Human intervention needed.", "info")
+                    ai_msg_auto += f" {idx}. {issue_text} - Human intervention needed."
                 else:
-                    await notify_user(f" {idx}. {issue_text}", "info")                                          
+                    ai_msg_auto += f" {idx}. {issue_text}"                                         
                 
             if all(issue.get("suggested_commands") is None or len(issue.get("suggested_commands")) == 0 for issue in issues):
-                await notify_user("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.", "human_intervention_needed")
+                ai_msg_auto += "\n\n**Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.**"
+                await notify_user(ai_msg_auto, "human_intervention_needed")
                 return
                 
             elif any(issue.get("human_intervention_needed", False) and idx < len(issues) - idx for idx, issue in enumerate(issues)):
-                await notify_user("⚠️ Some critical issues require human intervention. Please consider escalating to a technician.", "human_intervention_needed")
+                ai_msg_auto += "\n\n**⚠️ Some critical issues require human intervention. Please consider escalating to a technician.**"
+                await notify_user(ai_msg_auto, "human_intervention_needed")
                 return
             else:
+                await notify_user(ai_msg_auto, "info")
                 # Execute troubleshooting node
-                troubleshoot_result = troubleshoot_node({
+                troubleshoot_result = await troubleshoot_node({
                     "logs": logs,
                     "detected_issues": issues,
                     "category": category,
-                    "ticketId": ticketId
+                    "ticketId": ticketId,
+                    "agentId": agentId,
+                    "selected_commands": selected_commands
                 })
+                if troubleshoot_result is None or troubleshoot_result.get("error"):
+                    await notify_user("Failed to troubleshoot", troubleshoot_result.get("error"))
+                    return
+                ai_msg_auto = "\n**Troubleshooting Summary:**\n\n"
                 if troubleshoot_result and "summary" in troubleshoot_result:
-                    await notify_user("**Troubleshooting Summary:**", "info")
-                    build_conversation_payload(ticketId, ai_msg_auto, False)
-                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                    st.session_state.chat_history.append(AIMessage(troubleshoot_result["summary"]))
-                    build_conversation_payload(ticketId, troubleshoot_result["summary"], False)
-                    st.session_state.awaiting_resolution_confirmation = False
-                    st.session_state.show_buttons = True
+                    summary = troubleshoot_result.get("summary")
+                    if summary.get("issues_fixed") and len(summary.get("issues_fixed")) > 0:
+                        ai_msg_auto += "**Issues Fixed:**\n\n"
+                        for issue in summary.get("issues_fixed"):
+                            issue_text = issue.get('issue', 'Unknown issue')
+                            issue_details = issue.get('issue_details', 'Unknown details')
+                            ai_msg_auto += f"- **{issue_text}**: {issue_details}\n"
+
+                    if summary.get("issues_remaining") and len(summary.get("issues_remaining")) > 0:
+                        ai_msg_auto += "**Issues Remaining:**\n\n"
+                        for issue in summary.get("issues_remaining"):
+                            issue_text = issue.get('issue', 'Unknown issue')
+                            issue_details = issue.get('issue_details', 'Unknown details')
+                            ai_msg_auto += f"- **{issue_text}**: {issue_details}\n"
+                    
+                    if summary.get("notes"):
+                        ai_msg_auto += "**Notes:**\n"
+                        notes = summary.get("notes")
+                        ai_msg_auto += notes
+                    
+                    if summary.get("needs_human_intervention"):
+                        ai_msg_auto += "\n_⚠️For further troubleshooting, system recommend to consider escalating to a technician._\n"       
+                        await notify_user(ai_msg_auto, "human_intervention_needed")
+                        return
+                    
+                    else:
+                        ai_msg_auto += "\n✅ Troubleshooting completed. System appears to be functioning normally.\n"
+                        await notify_user(ai_msg_auto, "success")
+                        return
                 else:
                     ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
-                    st.warning("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.")
-                    build_conversation_payload(ticketId, ai_msg_auto, False)
-                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
-                    # Call for human intervention
-                    st.session_state.awaiting_resolution_confirmation = False
-                    st.session_state.awaiting_technician_confirmation = True
+                    await notify_user(ai_msg_auto, "human_intervention_needed")
+                    return
         else:
-            no_issues_msg = "✅ No issues detected. System appears to be functioning normally."
-            st.info(no_issues_msg)
-            build_conversation_payload(ticketId, no_issues_msg, False)
-            st.session_state.chat_history.append(AIMessage(no_issues_msg))
-            st.session_state.awaiting_resolution_confirmation = False
-            st.session_state.awaiting_technician_confirmation = True
+            no_issues_msg = "No issues detected. System appears to be functioning normally."
+            await notify_user(no_issues_msg, "human_intervention_needed")
+            return
     else:
         warning_msg = "⚠️ Diagnostics completed but no results were returned."
-        st.warning(warning_msg)
-        build_conversation_payload(ticketId, warning_msg, False)
-        st.session_state.chat_history.append(AIMessage(warning_msg))
-        st.session_state.awaiting_resolution_confirmation = False
-        st.session_state.awaiting_technician_confirmation = True
+        await notify_user(warning_msg)
+        return
