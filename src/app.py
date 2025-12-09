@@ -6,6 +6,7 @@ os.environ["STREAMLIT_SERVER_FILE_WATCHER"] = "none"
 
 import streamlit as st
 import smtplib
+import asyncio
 
 
 # MUST BE FIRST - Set page config before any other Streamlit commands
@@ -51,7 +52,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
 # --- Troubleshooting Imports ---
-from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node
+from troublshoot import troubleshoot_node, diagnostics_node, log_collector_node, start_auto_fix
 
 # =============================
 # STREAMLIT STATE INITIALIZATION
@@ -75,7 +76,8 @@ DEFAULTS = {
     # Added defaults for ticket tracking
     "current_ticket_id": None,
     "ticket_created": False,
-    "log_commands": []
+    "log_commands": [],
+    "agent_id": None
 }
 
 for k, v in DEFAULTS.items():
@@ -2019,7 +2021,6 @@ elif st.session_state.show_buttons:
 elif st.session_state.awaiting_resolution_confirmation:
     # Prompt for AI fix attempt
     ticketId = st.session_state.current_ticket_id
-
     st.markdown("---")
     with st.chat_message("AI"):
         ai_msg = "AI can attempt an automatic fix. Do you want to proceed?"
@@ -2047,6 +2048,12 @@ elif st.session_state.awaiting_resolution_confirmation:
                     )  
 
                     ticket_payload = result[0].payload if result else None
+                    if not ticket_payload:
+                        raise Exception("Error retreiving ticket payload")
+                    category = ticket_payload.get("category", "General")
+                    agentId = st.session_state.agent_id
+                    context = st.session_state.chat_history
+                    asyncio.create_task(start_auto_fix(ticketId, agentId, context, category))
                 except:
                     raise Exception("Error retreiving ticket payload")
                 with st.spinner("🔄 Processing your request..."):
@@ -2057,7 +2064,6 @@ elif st.session_state.awaiting_resolution_confirmation:
                         build_conversation_payload(ticketId, ai_msg_auto, False)
                     
                     # Collect logs
-                    category = ticket_payload.get("category", "General")
                     logs = log_collector_node(category)["logs"]
                     ai_msg_auto = "**Logs collected. Running diagnostics...**"
                     st.markdown(f"{ai_msg_auto}")

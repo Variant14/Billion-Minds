@@ -452,6 +452,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import json
 import uuid
 import logging
+import asyncio
+import streamlit as st
 logger = logging.getLogger("command_calls")
 app = FastAPI()
 
@@ -507,3 +509,32 @@ def validate_token(agent_id, token):
 
 def handle_command_result(agent_id, payload):
     logging.info("Result from %s: %s", agent_id, payload)
+    
+
+pending_requests = {}  # request_id -> asyncio.Future
+
+
+async def send_command_and_wait(agent_id, command, timeout=15):
+    request_id = str(uuid.uuid4())
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+
+    pending_requests[request_id] = future
+
+    ws = st.session_state.agent_id
+    if not ws:
+        raise Exception("Please make sure your agent is up and running.")
+
+    message = {
+        "type": "run_command",
+        "request_id": request_id,
+        "command": command
+    }
+
+    await ws.send_text(json.dumps(message))
+
+    try:
+        result = await asyncio.wait_for(future, timeout)
+        return result
+    finally:
+        pending_requests.pop(request_id, None)

@@ -89,6 +89,56 @@ def log_collector_node(category):
     return {"logs": logs}
     
 
+import logging
+import asyncio
+from utils import send_command_and_wait
+
+logger = logging.getLogger("log_calls")
+
+
+async def log_collector_node(category, agent_id):
+    """Collect logs via WebSocket agent instead of SSH"""
+
+    selected_commands = st.session_state.get("log_commands")
+    ticketId = st.session_state.get("current_ticket_id")
+
+    if not selected_commands:
+        selected_commands = log_commands_generator_node(category)
+        st.session_state.log_commands = selected_commands
+
+    logs = {}
+
+    print("selected commands:\n", selected_commands)
+
+    for cmd in selected_commands:
+        command = cmd.get("command")
+        message = cmd.get("message")
+
+        print(f"Requesting command: {command}")
+
+        try:
+            # ✅ Keep local allow-list (defense in depth)
+            if not is_allowed(command):
+                print(f"Command not allowed: {command}")
+                continue
+
+            # ✅ UI + conversation unchanged
+            st.markdown(message)
+            st.session_state.chat_history.append(AIMessage(message))
+            build_conversation_payload(ticketId, message, False)
+
+            # ✅ WebSocket execution (REPLACEMENT)
+            result = asyncio.run(send_command_and_wait(agent_id, command))
+
+            logs[command] = result
+            logger.info(f"{ticketId}: Executed command: {command}")
+
+        except Exception as e:
+            logger.error(f"{ticketId}: Error executing {command}: {e}")
+            logs[command] = f"ERROR executing command {command}: {e}"
+
+    return {"logs": logs}
+
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -238,3 +288,81 @@ def troubleshoot_node(state):
         st.session_state.chat_history.append(AIMessage(troubleshoot_ai_msg))
         build_conversation_payload(ticketId, troubleshoot_ai_msg, False)
         return state
+  
+async def notify_user(message, state="info"):
+    await st.session_state.ui_message_queue.put({
+        "message": message,
+        "state": state
+    })
+
+
+async def start_auto_fix(ticketId, agentId, context, category):
+    print("Starting auto fix...")
+    
+    logs = log_collector_node(category)["logs"]
+    
+    diagnostics_node_result = diagnostics_node(logs, context)
+    
+    # Build AI message with issues and commands
+    if diagnostics_node_result and "detected_issues" in diagnostics_node_result:
+        issues = diagnostics_node_result["detected_issues"]
+        
+        if issues:
+            # Display issues in UI
+            await notify_user("**Diagnostics completed. Issues detected:**", "info")
+            
+            # Build formatted message for chat history
+            # issues_message = "**Diagnostic Results:**\n\n**Issues Detected:**\n"
+            for idx, issue in enumerate(issues, 1):
+                issue_text = issue.get('issue', 'Unknown issue')
+                human_intervention = issue.get('human_intervention_needed', False)
+                if human_intervention:
+                    await notify_user(f" {idx}. {issue_text} - Human intervention needed.", "info")
+                else:
+                    await notify_user(f" {idx}. {issue_text}", "info")                                          
+                
+            if all(issue.get("suggested_commands") is None or len(issue.get("suggested_commands")) == 0 for issue in issues):
+                await notify_user("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.", "human_intervention_needed")
+                return
+                
+            elif any(issue.get("human_intervention_needed", False) and idx < len(issues) - idx for idx, issue in enumerate(issues)):
+                await notify_user("⚠️ Some critical issues require human intervention. Please consider escalating to a technician.", "human_intervention_needed")
+                return
+            else:
+                # Execute troubleshooting node
+                troubleshoot_result = troubleshoot_node({
+                    "logs": logs,
+                    "detected_issues": issues,
+                    "category": category,
+                    "ticketId": ticketId
+                })
+                if troubleshoot_result and "summary" in troubleshoot_result:
+                    await notify_user("**Troubleshooting Summary:**", "info")
+                    build_conversation_payload(ticketId, ai_msg_auto, False)
+                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                    st.session_state.chat_history.append(AIMessage(troubleshoot_result["summary"]))
+                    build_conversation_payload(ticketId, troubleshoot_result["summary"], False)
+                    st.session_state.awaiting_resolution_confirmation = False
+                    st.session_state.show_buttons = True
+                else:
+                    ai_msg_auto += "\nSorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.\n"
+                    st.warning("Sorry, we could not find any solution for this issue at the moment. Please consider escalating to a technician.")
+                    build_conversation_payload(ticketId, ai_msg_auto, False)
+                    st.session_state.chat_history.append(AIMessage(ai_msg_auto))
+                    # Call for human intervention
+                    st.session_state.awaiting_resolution_confirmation = False
+                    st.session_state.awaiting_technician_confirmation = True
+        else:
+            no_issues_msg = "✅ No issues detected. System appears to be functioning normally."
+            st.info(no_issues_msg)
+            build_conversation_payload(ticketId, no_issues_msg, False)
+            st.session_state.chat_history.append(AIMessage(no_issues_msg))
+            st.session_state.awaiting_resolution_confirmation = False
+            st.session_state.awaiting_technician_confirmation = True
+    else:
+        warning_msg = "⚠️ Diagnostics completed but no results were returned."
+        st.warning(warning_msg)
+        build_conversation_payload(ticketId, warning_msg, False)
+        st.session_state.chat_history.append(AIMessage(warning_msg))
+        st.session_state.awaiting_resolution_confirmation = False
+        st.session_state.awaiting_technician_confirmation = True
